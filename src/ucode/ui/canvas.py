@@ -1,26 +1,23 @@
-"""The infinite viewport widget: a tile grid that pans and zooms without limits."""
+"""The infinite workspace widget: a blank surface that pans and zooms without limits."""
 
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPaintEvent, QPen, QWheelEvent
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPaintEvent, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
 from ucode.core.viewport import Viewport
 
 BACKGROUND = QColor("#fcfcfd")
-MINOR_LINE = QColor("#d3d8e1")
-MAJOR_LINE = QColor("#a7afbd")
-MAJOR_EVERY = 8  # every eighth tile line is drawn stronger, as a coarse ruler
-MINOR_VISIBLE_ABOVE = 6.0  # px per tile; below this the minor grid is too dense
 ZOOM_PER_NOTCH = 1.2
 
 
 class Canvas(QWidget):
     """The infinite workspace.
 
+    No grid is drawn: nodes are laid out automatically, so the surface stays plain.
     Drag with the left or middle mouse button to pan, wheel to zoom around the pointer.
-    Only the grid is drawn for now; nodes, ports and edges arrive in M2.
+    Nodes, ports and edges arrive later.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -38,39 +35,7 @@ class Canvas(QWidget):
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), BACKGROUND)
-        self._paint_grid(painter)
         painter.end()
-
-    def _paint_grid(self, painter: QPainter) -> None:
-        viewport = self.viewport
-        if viewport.tile_size() <= 0:
-            return
-
-        left, top, right, bottom = viewport.visible_tiles(
-            self.width(), self.height()
-        )
-        draw_minor = viewport.tile_size() >= MINOR_VISIBLE_ABOVE
-
-        minor_pen = QPen(MINOR_LINE)
-        minor_pen.setWidth(1)
-        major_pen = QPen(MAJOR_LINE)
-        major_pen.setWidth(1)
-
-        for tile_x in range(left, right + 1):
-            major = tile_x % MAJOR_EVERY == 0
-            if not major and not draw_minor:
-                continue
-            screen_x = viewport.world_to_screen(tile_x * viewport.tile, 0.0)[0]
-            painter.setPen(major_pen if major else minor_pen)
-            painter.drawLine(QPointF(screen_x, 0.0), QPointF(screen_x, self.height()))
-
-        for tile_y in range(top, bottom + 1):
-            major = tile_y % MAJOR_EVERY == 0
-            if not major and not draw_minor:
-                continue
-            screen_y = viewport.world_to_screen(0.0, tile_y * viewport.tile)[1]
-            painter.setPen(major_pen if major else minor_pen)
-            painter.drawLine(QPointF(0.0, screen_y), QPointF(self.width(), screen_y))
 
     # -- interaction ---------------------------------------------------
     def mousePressEvent(self, event: QMouseEvent) -> None:

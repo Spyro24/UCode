@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QShowEvent
-from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QMenu, QSplitter, QWidget
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QHBoxLayout,
+    QMainWindow,
+    QMenu,
+    QSplitter,
+    QWidget,
+)
 
 from ucode.ui.panel_toggle import PanelToggle
 from ucode.ui.side_panel import SidePanel
@@ -27,6 +36,7 @@ class MainWindow(QMainWindow):
         self.resize(1280, 800)
 
         self._split_applied = False
+        self.folder: Path | None = None
 
         self._build_menu_bar()
         self._build_central_area()
@@ -70,6 +80,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self.panel_toggle.button.clicked.connect(self.toggle_side_panel)
+        self.work_area.empty_state.folder_requested.connect(self.open_folder)
 
     def showEvent(self, event: QShowEvent) -> None:
         """Hand the whole width to the work area once the window has a real size."""
@@ -99,3 +110,12 @@ class MainWindow(QMainWindow):
             self.close_side_panel()
         else:
             self.open_side_panel()
+
+    def open_folder(self) -> None:
+        """Ask for a folder and switch the workspace over to it."""
+        path = QFileDialog.getExistingDirectory(self, "Open Folder")
+        if not path:
+            return
+
+        self.folder = Path(path)
+        self.work_area.show_canvas()
