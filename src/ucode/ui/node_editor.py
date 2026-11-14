@@ -5,7 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QRect, QSize, Qt
-from PySide6.QtGui import QColor, QFocusEvent, QFont, QPainter, QPaintEvent
+from PySide6.QtGui import (
+    QColor,
+    QFocusEvent,
+    QFont,
+    QFontMetricsF,
+    QPainter,
+    QPaintEvent,
+)
 from PySide6.QtWidgets import QFrame, QPlainTextEdit, QWidget
 
 from ucode.ui.highlighters import highlighter_for
@@ -46,6 +53,10 @@ class NodeEditor(QPlainTextEdit):
         # No document margin: the node was measured without one.
         self.document().setDocumentMargin(0)
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        # A node is exactly as big as its text, so nothing ever needs to scroll — and a
+        # scrollbar would eat into the space the text was fitted to.
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setStyleSheet(
             f"QPlainTextEdit {{ background-color: {BG_NODE_EDITOR}; color: {TEXT};"
             f" border: none; selection-background-color: {SELECTION}; }}"
@@ -136,15 +147,53 @@ class NodeEditor(QPlainTextEdit):
     def _update_tab_width(self) -> None:
         self.setTabStopDistance(self.fontMetrics().horizontalAdvance(" ") * 4)
 
-    def set_zoom_font(self, pixels: int) -> None:
-        """Scale the text with the canvas zoom."""
+    def set_font_size(self, pixels: int) -> None:
         font = self.font()
-        # The same floor the canvas uses, so text never outgrows the node it was sized for.
-        font.setPixelSize(max(5, pixels))
+        font.setPixelSize(max(3, pixels))
         self.setFont(font)
         self._update_tab_width()
         self._update_gutter_width()
         self._gutter.update()
+
+    def fit_text(self, width: int, height: int, columns: int, rows: int) -> None:
+        """Pick the font that makes the code fill this node exactly.
+
+        The node keeps its size, so the *text* has to follow it: a font tied to the zoom
+        instead would be rounded to whole pixels and leave a gap that grows with the
+        distance from 1:1. Solving for the box keeps the code flush with its edges at
+        every zoom, and the shrink loop below guarantees nothing is clipped either.
+        """
+        digits = len(str(max(1, rows)))
+
+        probe = QFont(self.font())
+        probe.setPixelSize(100)
+        metrics = QFontMetricsF(probe)
+        advance = max(1.0, metrics.horizontalAdvance("9"))
+        spacing = max(1.0, metrics.lineSpacing())
+
+        # Room for the gutter, the widest line, a cursor and a couple of pixels of slack.
+        by_width = (max(1, width) - 8) * 100.0 / (
+            advance * (max(1, columns) + digits + 1.2)
+        )
+        by_height = (max(1, height) - 2) * 100.0 / (spacing * max(1, rows))
+
+        estimate = max(3, int(min(by_width, by_height)))
+
+        # Take the largest size that really fits, measured with the font itself, so no
+        # rounding can push a line or a row out of the node.
+        for size in range(estimate + 1, 2, -1):
+            self.set_font_size(size)
+            metrics = self.fontMetrics()
+            advance = metrics.horizontalAdvance("9")
+            # The gutter takes its own slice of the width, so count it exactly.
+            gutter = max(6, round(advance * (digits + 1.2)))
+            needed_width = advance * max(1, columns) + gutter + 4
+            needed_height = metrics.lineSpacing() * max(1, rows) + 2
+
+            if needed_width <= width and needed_height <= height:
+                return
+
+        self.set_font_size(3)
 
     def save(self) -> None:
         if not self.document().isModified():

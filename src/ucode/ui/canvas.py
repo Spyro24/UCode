@@ -159,8 +159,6 @@ class Canvas(QWidget):
                 editor.installEventFilter(self)
                 self._editors[node.path] = editor
 
-            # Floor, so the text always stays inside the node it was measured for.
-            editor.set_zoom_font(max(5, int(FONT_PIXELS * zoom)))
             editor.setGeometry(
                 QRect(
                     int(rect.left()) + 3,
@@ -168,6 +166,10 @@ class Canvas(QWidget):
                     max(12, int(rect.width()) - 6),
                     max(12, int(rect.height() - header) - 4),
                 )
+            )
+            # The node is the fixed size, so the text is fitted to it.
+            editor.fit_text(
+                editor.width(), editor.height(), node.columns, node.rows
             )
             editor.show()
 
@@ -389,7 +391,13 @@ class Canvas(QWidget):
         if node.kind != "file":
             return rect.center().y()
 
-        height = self._line_height(zoom)
+        # Use the editor's own metrics: each node fits its font to its box.
+        editor = self._editors.get(node.path)
+        height = (
+            QFontMetricsF(editor.font()).lineSpacing()
+            if editor is not None
+            else self._line_height(zoom)
+        )
         top = rect.top() + TILE * zoom * NODE_HEADER_TILES + 1
         bottom = rect.bottom() - 1
         y = top + (max(1, line) - 0.5) * height

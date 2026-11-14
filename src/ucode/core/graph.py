@@ -23,11 +23,11 @@ from ucode.languages.imports import c_includes, c_system_includes, python_import
 
 # Approximate monospace metrics at the editor's base size, used to measure nodes without
 # creating a widget for every file first.
-CHAR_PX = 7  # measured advance at the base size is 6.61, so this is safe
-LINE_PX = 13  # measured line spacing at the base size is 12.80, plus a little slack
+CHAR_PX = 6.8  # measured advance at the base size is 6.61, plus a hair of slack
+LINE_PX = 12.9  # measured line spacing at the base size is 12.80
 HEADER_PX = TILE
 EDITOR_PAD_PX = 14
-MIN_NODE_PX = (168, 120)  # a floor for nearly-empty files, not a target size
+MIN_NODE_PX = (132, 96)  # a floor for nearly-empty files, not a target size
 MAX_COLUMNS = 300  # longer lines scroll horizontally rather than growing the node forever
 
 PADDING = 0.5  # tiles between a folder box edge and the nodes inside it
@@ -146,8 +146,8 @@ def node_size(rows: int, columns: int) -> tuple[float, float]:
     """
     digits = len(str(max(1, rows)))
     gutter_px = (digits + 1) * CHAR_PX
-    width_px = max(MIN_NODE_PX[0], columns * CHAR_PX + 34 + gutter_px)
-    height_px = max(MIN_NODE_PX[1], HEADER_PX + rows * LINE_PX + EDITOR_PAD_PX)
+    width_px = max(MIN_NODE_PX[0], columns * CHAR_PX + 20 + gutter_px)
+    height_px = max(MIN_NODE_PX[1], HEADER_PX + rows * LINE_PX + 8)
 
     return (width_px / TILE, height_px / TILE)
 
