@@ -23,7 +23,15 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
-from ucode.core.graph import BOX_GAP, GAP, PADDING, FileGraph, node_size
+from ucode.core.graph import (
+    BOX_GAP,
+    GAP,
+    HEADER,
+    PADDING,
+    FileGraph,
+    folder_size,
+    node_size,
+)
 from ucode.core.routing import crosses, route
 from ucode.core.tile import TILE
 from ucode.core.viewport import MIN_ZOOM, Viewport
@@ -230,18 +238,70 @@ class Canvas(QWidget):
         if (rows, columns) == (node.rows, node.columns):
             return
 
+        old_size = node.size
         node.rows = rows
         node.columns = columns
         node.size = node_size(rows, columns)
 
-        moved = [node, *self._make_room(node)]
-        self._grow_folder(node)
-        for item in moved:
-            self._replan_near(item, thorough=True)
+        moved = [node]
+        if node.size[1] < old_size[1]:
+            # Shrunk: close the gap it left so the group and its box really get smaller.
+            moved.extend(self._compact_group(node))
+        else:
+            moved.extend(self._make_room(node))
+
+        node_spread = self._resolve_node_overlaps(node.folder)
+
+        if self._fit_folder(node) or node_spread:
+            # Whole groups shifted, so every route has to be looked at again.
+            self._rebuild_routes()
+        else:
+            for item in moved:
+                self._replan_near(item, thorough=True)
 
         self._sync_editors()
         self.update()
         self.node_moved.emit()
+
+    def _compact_group(self, node) -> list:
+        """Slide a group's nodes up into the gap left by one that shrank."""
+        if self.graph is None:
+            return []
+
+        members = [m for m in self.graph.nodes if m.folder == node.folder]
+        if not members:
+            return []
+
+        moved: list = []
+
+        # A node that is blocked in one pass can come free in the next, so repeat.
+        for _ in range(4):
+            top = min(m.tile[1] for m in members)
+            pass_moved = False
+
+            for member in sorted(members, key=lambda m: (m.tile[1], m.tile[0])):
+                # The highest it can go: the group's top, or just under its neighbour above.
+                highest = top
+                for other in self.graph.nodes:
+                    if other is member:
+                        continue
+                    if (
+                        member.tile[0] >= other.tile[0] + other.size[0]
+                        or other.tile[0] >= member.tile[0] + member.size[0]
+                    ):
+                        continue
+                    highest = max(highest, other.tile[1] + other.size[1] + GAP)
+
+                if highest < member.tile[1] - 1e-9:
+                    member.tile = (member.tile[0], highest)
+                    pass_moved = True
+                    if member not in moved:
+                        moved.append(member)
+
+            if not pass_moved:
+                break
+
+        return moved
 
     def _make_room(self, node) -> list:
         """Push siblings out of the way of a node that just grew."""
@@ -280,55 +340,113 @@ class Canvas(QWidget):
 
         return pushed
 
-    def _grow_folder(self, node, limit: int = 24) -> None:
-        """Enlarge the node's group to hold it, shoving neighbours clear if needed."""
+    def _fit_folder(self, node, limit: int = 24) -> bool:
+        """Fit the node's group around its members; report whether neighbours moved."""
         if self.graph is None:
-            return
+            return False
 
         box = next(
             (b for b in self.graph.folders if b.folder == node.folder), None
         )
         if box is None:
-            return
+            return False
 
-        # Fit the group around whatever its members now occupy; never shrink it.
         members = [m for m in self.graph.nodes if m.folder == box.folder]
-        right = max(
-            (m.tile[0] + m.size[0] for m in members),
-            default=box.tile[0] + box.size[0] - PADDING,
-        ) + PADDING
-        bottom = max(
-            (m.tile[1] + m.size[1] for m in members),
-            default=box.tile[1] + box.size[1] - PADDING,
-        ) + PADDING
-        box.size = (
-            max(box.size[0], right - box.tile[0]),
-            max(box.size[1], bottom - box.tile[1]),
+        if not members:
+            return False
+
+        # The group hugs whatever its nodes occupy now, so it grows with the text and
+        # gives that room back when the text is removed again.
+        left = min(m.tile[0] for m in members)
+        top = min(m.tile[1] for m in members)
+        content = (
+            max(m.tile[0] + m.size[0] for m in members) - left,
+            max(m.tile[1] + m.size[1] for m in members) - top,
         )
+        box.size = folder_size(content, box.label)
+        box.tile = (left - PADDING, top - HEADER - PADDING)
+
+        return self._resolve_overlaps(box, limit)
+
+    def _box_rect(self, box) -> QRectF:
+        return QRectF(box.tile[0], box.tile[1], box.size[0], box.size[1])
+
+    def _resolve_overlaps(self, keep, limit: int = 96) -> bool:
+        """Groups never overlap: neighbours make way, and `keep` is the one that stays."""
+        shifted = False
 
         for _ in range(limit):
-            other = next(
+            pair = next(
                 (
-                    b
-                    for b in self.graph.folders
-                    if b is not box
-                    and QRectF(
-                        box.tile[0], box.tile[1], box.size[0], box.size[1]
-                    ).intersects(
+                    (a, b)
+                    for index, a in enumerate(self.graph.folders)
+                    for b in self.graph.folders[index + 1 :]
+                    if self._box_rect(a).intersects(self._box_rect(b))
+                ),
+                None,
+            )
+            if pair is None:
+                return shifted
+
+            first, second = pair
+            if first is keep:
+                self._shift_box(second, *self._escape(keep, second))
+            elif second is keep:
+                self._shift_box(first, *self._escape(keep, first, around=True))
+            else:
+                self._shift_box(second, *self._escape(first, second))
+            shifted = True
+
+        return shifted
+
+    def _resolve_node_overlaps(self, folder: str, limit: int = 96) -> bool:
+        """No two nodes of a group may cover each other once one of them has grown."""
+        moved = False
+        members = [m for m in self.graph.nodes if m.folder == folder]
+
+        for _ in range(limit):
+            pair = next(
+                (
+                    (a, b)
+                    for index, a in enumerate(members)
+                    for b in members[index + 1 :]
+                    if QRectF(a.tile[0], a.tile[1], a.size[0], a.size[1]).intersects(
                         QRectF(b.tile[0], b.tile[1], b.size[0], b.size[1])
                     )
                 ),
                 None,
             )
-            if other is None:
-                return
+            if pair is None:
+                return moved
 
-            # Groups never overlap: move this one past the other and take its nodes.
-            shift = other.tile[0] + other.size[0] + BOX_GAP - box.tile[0]
-            box.tile = (box.tile[0] + shift, box.tile[1])
-            for member in self.graph.nodes:
-                if member.folder == box.folder:
-                    member.tile = (member.tile[0] + shift, member.tile[1])
+            first, second = pair
+            dx, dy = self._escape(first, second, gap=GAP)
+            second.tile = (second.tile[0] + dx, second.tile[1] + dy)
+            moved = True
+
+        return moved
+
+    @staticmethod
+    def _escape(
+        fixed, mover, around: bool = False, gap: float = BOX_GAP
+    ) -> tuple[float, float]:
+        """The smallest way of moving `mover` clear of `fixed`."""
+        right = fixed.tile[0] + fixed.size[0] + gap - mover.tile[0]
+        down = fixed.tile[1] + fixed.size[1] + gap - mover.tile[1]
+        if not around:
+            return (0.0, down) if down <= right else (right, 0.0)
+
+        left = mover.tile[0] + mover.size[0] + gap - fixed.tile[0]
+        up = mover.tile[1] + mover.size[1] + gap - fixed.tile[1]
+        options = [(0.0, -up), (-left, 0.0), (0.0, down), (right, 0.0)]
+        return min(options, key=lambda step: abs(step[0]) + abs(step[1]))
+
+    def _shift_box(self, box, dx: float, dy: float) -> None:
+        """Move a group and every node inside it."""
+        box.tile = (box.tile[0] + dx, box.tile[1] + dy)
+        for member in self.graph.nodes:
+            if member.folder == box.folder:
+                member.tile = (member.tile[0] + dx, member.tile[1] + dy)
 
     def _line_tile_y(self, node, line: int) -> float:
         """Where a line sits inside a node, in tiles: the same for every zoom."""

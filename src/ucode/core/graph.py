@@ -151,6 +151,11 @@ def node_size(rows: int, columns: int) -> tuple[float, float]:
     return (width_px / TILE, height_px / TILE)
 
 
+def folder_size(content: tuple[float, float], label: str) -> tuple[float, float]:
+    """The box a group needs around nodes occupying `content` tiles."""
+    return (box_width(content[0], label), HEADER + PADDING * 2 + content[1])
+
+
 def box_width(nodes_width: float, label: str) -> float:
     """A group box wide enough for its widest node and for its own name."""
     label_px = len(label) * 9 + 24  # bold header text, measured generously
@@ -344,10 +349,7 @@ def _layout(
             folder=group.folder,
             label=group.label,
             tile=(0.0, 0.0),
-            size=(
-                box_width(group.content[0], group.label),
-                HEADER + PADDING * 2 + group.content[1],
-            ),
+            size=folder_size(group.content, group.label),
         )
         for group in groups
     ]
