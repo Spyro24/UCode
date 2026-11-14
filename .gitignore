@@ -1,0 +1,16 @@
+# project-local virtualenv and build output
+.venv/
+build/
+dist/
+*.egg-info/
+
+# python
+__pycache__/
+*.py[cod]
+
+# compiled C accelerators — built locally, never committed
+src/ucode/accel/*.so
+
+# editor scratch
+*.swp
+.ucode/cache/
