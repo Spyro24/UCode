@@ -240,8 +240,9 @@ Prove the risky parts before committing the architecture.
       warm dlopen latency; where the compile cache must live.
 - [ ] Decide: toolkit, text control, C front-end strategy, the accelerator boundary, and the value
       encoding's first version.
-- [ ] Repo scaffolding: `src/ucode` as an installable package (`pyproject.toml`, src layout), `pytest`,
-      a single `ucode` entry point, and `src/ucode/accel/` present but deliberately unbuilt.
+- [ ] Repo scaffolding: a plain `src/ucode` tree started by the system interpreter through
+      `run.py` — no packaging, no virtualenv — plus `pytest`, and `src/ucode/accel/` present but
+      deliberately unbuilt.
 
 **Exit:** one decision record per spike, `SPEC.md` reviewed.
 
