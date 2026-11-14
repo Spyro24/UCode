@@ -24,16 +24,16 @@ from ucode.languages.imports import c_includes, c_system_includes, python_import
 # Approximate monospace metrics at the editor's base size, used to measure nodes without
 # creating a widget for every file first.
 CHAR_PX = 7  # measured advance at the base size is 6.61, so this is safe
-LINE_PX = 15  # measured line spacing at the base size is 12.80, plus slack
+LINE_PX = 13  # measured line spacing at the base size is 12.80, plus a little slack
 HEADER_PX = TILE
 EDITOR_PAD_PX = 14
-MIN_NODE_PX = (240, 128)
+MIN_NODE_PX = (140, 96)  # a floor for nearly-empty files, not a target size
 MAX_COLUMNS = 300  # longer lines scroll horizontally rather than growing the node forever
 
-PADDING = 1  # tiles between a folder box edge and the nodes inside it
+PADDING = 0.5  # tiles between a folder box edge and the nodes inside it
 HEADER = 1  # tiles reserved for the folder's name
-GAP = 1  # tiles between nodes in the same folder
-BOX_GAP = 3  # tiles between folder boxes
+GAP = 0.75  # tiles between nodes in the same folder
+BOX_GAP = 2  # tiles between folder boxes
 BOXES_PER_ROW = 4
 
 CHIP_TILES = 1  # height of an import node
@@ -124,23 +124,30 @@ def _measure(text: str) -> tuple[int, int]:
     return rows, min(MAX_COLUMNS, max(1, columns))
 
 
-def node_size(rows: int, columns: int) -> tuple[int, int]:
-    """Tile size that holds the whole file, gutter included, at the base font size."""
+def node_size(rows: int, columns: int) -> tuple[float, float]:
+    """Exact size that holds the whole file: the box ends just past its last character.
+
+    Sizes are fractional tiles on purpose. Rounding up to whole tiles used to leave up to
+    a tile of empty space on the right of every node.
+    """
     digits = len(str(max(1, rows)))
     gutter_px = (digits + 1) * CHAR_PX
     width_px = max(MIN_NODE_PX[0], columns * CHAR_PX + 34 + gutter_px)
     height_px = max(MIN_NODE_PX[1], HEADER_PX + rows * LINE_PX + EDITOR_PAD_PX)
 
-    return (
-        math.ceil(width_px / TILE),
-        math.ceil(height_px / TILE),
-    )
+    return (width_px / TILE, height_px / TILE)
 
 
-def import_size(label: str) -> tuple[int, int]:
+def box_width(nodes_width: float, label: str) -> float:
+    """A group box wide enough for its widest node and for its own name."""
+    label_px = len(label) * 9 + 24  # bold header text, measured generously
+    return max(nodes_width + PADDING * 2, label_px / TILE)
+
+
+def import_size(label: str) -> tuple[float, float]:
     """A chip just wide enough for the dependency's name."""
-    width_px = len(label) * CHAR_PX + 28
-    return (max(2, math.ceil(width_px / TILE)), CHIP_TILES)
+    width_px = max(TILE, len(label) * CHAR_PX + 28)
+    return (width_px / TILE, CHIP_TILES)
 
 
 def _layout(
@@ -159,13 +166,11 @@ def _layout(
 
     for folder in sorted(files_by_folder):
         entries = sorted(files_by_folder[folder])
-        measured = [node_size(rows, columns) for _, rows, columns in entries]
+        # Each node keeps its own width, so a short file is not stretched to the width of
+        # the longest one beside it.
+        sizes = [node_size(rows, columns) for _, rows, columns in entries]
 
-        # One column width per folder, so the nodes inside it line up.
-        column_width = max(size[0] for size in measured)
-        sizes = [(column_width, size[1]) for size in measured]
-
-        box_width = PADDING * 2 + column_width
+        width = box_width(max(size[0] for size in sizes), root_label if folder == "" else folder)
         box_height = (
             HEADER
             + PADDING * 2
@@ -184,7 +189,7 @@ def _layout(
                 folder=folder,
                 label=root_label if folder == "" else folder,
                 tile=(cursor_x, row_y),
-                size=(box_width, box_height),
+                size=(width, box_height),
             )
         )
 
@@ -204,7 +209,7 @@ def _layout(
             )
             y += size[1] + GAP
 
-        cursor_x += box_width + BOX_GAP
+        cursor_x += width + BOX_GAP
         row_height = max(row_height, box_height)
         in_row += 1
 
@@ -220,8 +225,9 @@ def _layout(
             row_height = 0
             in_row = 0
 
-        column_width = max(import_size(name)[0] for name in names)
-        box_width = PADDING * 2 + column_width
+        sizes = [import_size(name) for name in names]
+        label = package or SYSTEM_LABEL
+        width = box_width(max(size[0] for size in sizes), label)
         box_height = (
             HEADER
             + PADDING * 2
@@ -233,21 +239,21 @@ def _layout(
         boxes.append(
             FolderBox(
                 folder=folder,
-                label=package or SYSTEM_LABEL,
+                label=label,
                 tile=(cursor_x, row_y),
-                size=(box_width, math.ceil(box_height)),
+                size=(width, box_height),
             )
         )
 
         y = row_y + HEADER + PADDING
-        for name in names:
+        for index, name in enumerate(names):
             nodes.append(
                 Node(
                     path=f"{EXTERN_FOLDER}/{name}",
                     label=name,
                     folder=folder,
                     tile=(cursor_x + PADDING, y),
-                    size=(column_width, CHIP_TILES),
+                    size=sizes[index],
                     rows=1,
                     columns=len(name),
                     kind="import",
@@ -255,7 +261,7 @@ def _layout(
             )
             y += CHIP_TILES + CHIP_GAP
 
-        cursor_x += box_width + BOX_GAP
+        cursor_x += width + BOX_GAP
         row_height = max(row_height, box_height)
         in_row += 1
 
