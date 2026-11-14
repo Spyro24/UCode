@@ -26,7 +26,6 @@ from ucode.languages.imports import c_includes, c_system_includes, python_import
 CHAR_PX = 6.8  # measured advance at the base size is 6.61, plus a hair of slack
 LINE_PX = 12.9  # measured line spacing at the base size is 12.80
 HEADER_PX = TILE
-EDITOR_PAD_PX = 14
 MIN_NODE_PX = (132, 96)  # a floor for nearly-empty files, not a target size
 MAX_COLUMNS = 300  # longer lines scroll horizontally rather than growing the node forever
 
