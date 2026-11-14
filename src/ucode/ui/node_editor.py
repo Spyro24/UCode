@@ -77,6 +77,9 @@ class NodeEditor(QPlainTextEdit):
         # Kept as an attribute: the document does not own its highlighter.
         self.highlighter = highlighter_for(path, self.document())
 
+        # The size the text was last fitted to, so moving a node does not re-fit it.
+        self._fitted: tuple[int, int, int, int] | None = None
+
         self._gutter = _LineNumbers(self)
         self.blockCountChanged.connect(self._update_gutter_width)
         self.updateRequest.connect(self._update_gutter)
@@ -163,6 +166,12 @@ class NodeEditor(QPlainTextEdit):
         distance from 1:1. Solving for the box keeps the code flush with its edges at
         every zoom, and the shrink loop below guarantees nothing is clipped either.
         """
+        # Fitting relayouts the whole document, so only do it when the box changed.
+        key = (width, height, columns, rows)
+        if key == self._fitted:
+            return
+        self._fitted = key
+
         digits = len(str(max(1, rows)))
 
         probe = QFont(self.font())

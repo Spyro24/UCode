@@ -104,6 +104,10 @@ def _search(
     if x1 not in xsorted or x2 not in xsorted or y1 not in ysorted or y2 not in ysorted:
         return None
 
+    # A grid this large costs more than the detour is worth.
+    if len(xsorted) * len(ysorted) > 2500:
+        return None
+
     xi = {x: index for index, x in enumerate(xsorted)}
     yi = {y: index for index, y in enumerate(ysorted)}
 
@@ -181,15 +185,88 @@ def _search(
     return None
 
 
-def route(start: Point, end: Point, obstacles: list[Rect]) -> list[Point]:
-    """The cheapest crossing-free orthogonal path from ``start`` to ``end``."""
+def _quick(start: Point, end: Point, obstacles: list[Rect]) -> list[Point] | None:
+    """The obvious routes, tried before any search: one elbow, then one detour.
+
+    These cover nearly every edge in a laid-out graph, which matters because the full
+    search below costs milliseconds per edge on a large project.
+    """
+    x1, y1 = start
+    x2, y2 = end
+    margin = 0.3
+
+    # Straight across, with a vertical channel in between.
+    if x2 - x1 > margin * 2:
+        middle = (x1 + x2) / 2
+        candidates = [middle, x1 + margin, x2 - margin]
+        for x, _, width, _ in obstacles:
+            candidates.append(x - margin)
+            candidates.append(x + width + margin)
+
+        best = sorted(
+            {round(x, 3) for x in candidates if x1 + margin <= x <= x2 - margin},
+            key=lambda x: abs(x - middle),
+        )[:12]
+
+        for x in best:
+            points = [(x1, y1), (x, y1), (x, y2), (x2, y2)]
+            if is_clear(points, obstacles):
+                return points
+
+    # Or around: out of the source, along a free band, into the target.
+    bands = [(y1 + y2) / 2]
+    for _, y, _, height in obstacles:
+        bands.append(y - margin)
+        bands.append(y + height + margin)
+
+    labelled = sorted(
+        {round(y, 3) for y in bands}, key=lambda y: abs(y - (y1 + y2) / 2)
+    )[:14]
+
+    # Just outside every box is always free, so it must always be offered — otherwise a
+    # dense graph sends almost every edge into the exhaustive search.
+    for extra in (
+        max(y + height for _, y, _, height in obstacles) + margin,
+        min(y for _, y, _, _ in obstacles) - margin,
+    ):
+        rounded = round(extra, 3)
+        if rounded not in labelled:
+            labelled.append(rounded)
+
+    for band in labelled:
+        points = [
+            (x1, y1),
+            (x1 + margin, y1),
+            (x1 + margin, band),
+            (x2 - margin, band),
+            (x2 - margin, y2),
+            (x2, y2),
+        ]
+        if is_clear(points, obstacles):
+            return points
+
+    return None
+
+
+def route(
+    start: Point, end: Point, obstacles: list[Rect], thorough: bool = True
+) -> list[Point]:
+    """The cheapest crossing-free orthogonal path from ``start`` to ``end``.
+
+    ``thorough=False`` stops after the cheap routes: while a drag is in flight that keeps
+    the frame cost bounded, and the full pass runs when the node is dropped.
+    """
     x1, y1 = start
     x2, y2 = end
 
     if not obstacles:
         return [(x1, y1), (x2, y1), (x2, y2)]
 
-    for pad in (2.0, 8.0, 24.0):
+    quick = _quick(start, end, obstacles)
+    if quick is not None or not thorough:
+        return quick if quick is not None else [(x1, y1), (x2, y1), (x2, y2)]
+
+    for pad in (2.0, 8.0):
         points = _search(x1, y1, x2, y2, obstacles, pad)
         if points:
             return points

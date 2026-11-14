@@ -14,6 +14,7 @@ from PySide6.QtGui import (
     QGuiApplication,
     QMouseEvent,
     QPainter,
+    QPixmap,
     QPainterPath,
     QPaintEvent,
     QPen,
@@ -23,7 +24,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 from ucode.core.graph import FileGraph
-from ucode.core.routing import route
+from ucode.core.routing import crosses, route
 from ucode.core.tile import TILE
 from ucode.core.viewport import MIN_ZOOM, Viewport
 from ucode.ui.node_editor import NodeEditor
@@ -96,6 +97,10 @@ class Canvas(QWidget):
         # Where each edge runs, planned in tiles so panning and zooming keep it valid.
         self._routes: list[list[tuple[float, float]]] = []
         self._routes_built = 0.0
+
+        # Folder and node chrome rendered once and re-blitted, so scrolling and
+        # dragging do not repaint the same rounded rectangles every frame.
+        self._layers: dict[tuple, QPixmap] = {}
 
         # A middle press that started on a node body: paste if it stays put, pan if not.
         self._pan_press: QPointF | None = None
@@ -219,8 +224,52 @@ class Canvas(QWidget):
 
     def _replan(self) -> None:
         """Re-plan while dragging, at a rate that cannot make the drag feel slow."""
-        if time.monotonic() - self._routes_built >= 0.08:
+        if time.monotonic() - self._routes_built >= 0.15:
             self._rebuild_routes()
+
+    def _replan_near(self, node) -> None:
+        """Re-plan only the edges the moved node can have disturbed."""
+        if self.graph is None or not self._routes:
+            return
+
+        obstacles = [
+            (other.tile[0], other.tile[1], other.size[0], other.size[1])
+            for other in self.graph.nodes
+        ]
+        box = (node.tile[0], node.tile[1], node.size[0], node.size[1])
+
+        for index, edge in enumerate(self.graph.edges):
+            source = self._nodes.get(edge.source)
+            target = self._nodes.get(edge.target)
+            if source is None or target is None:
+                continue
+
+            existing = self._routes[index] if index < len(self._routes) else []
+            disturbed = (
+                edge.source == node.path
+                or edge.target == node.path
+                or any(
+                    crosses(start, end, box)
+                    for start, end in zip(existing, existing[1:])
+                )
+            )
+            if not disturbed:
+                continue
+
+            self._routes[index] = route(
+                (
+                    source.tile[0] + source.size[0],
+                    self._line_tile_y(source, edge.source_line),
+                ),
+                (
+                    target.tile[0],
+                    self._line_tile_y(target, edge.target_line),
+                ),
+                obstacles,
+                thorough=False,
+            )
+
+        self._routes_built = time.monotonic()
 
     def _rebuild_routes(self) -> None:
         """Plan every edge so no line has to cross a node box."""
@@ -377,7 +426,7 @@ class Canvas(QWidget):
             self._drag_tile[0] + delta.x() / scale,
             self._drag_tile[1] + delta.y() / scale,
         )
-        self._replan()
+        self._replan_near(self._drag_node)
         self._sync_editors()
         self.update()
 
@@ -409,63 +458,105 @@ class Canvas(QWidget):
         font.setPointSizeF(max(6.0, points * self.viewport.zoom))
         return font
 
+    def _layer(self, key: tuple, width: int, height: int, paint) -> QPixmap:
+        """Draw a fixed-size piece once, then blit it until its size or zoom changes."""
+        pixmap = self._layers.get(key)
+        if pixmap is not None:
+            return pixmap
+
+        ratio = self.devicePixelRatioF()
+        pixmap = QPixmap(max(1, int(width * ratio)), max(1, int(height * ratio)))
+        pixmap.setDevicePixelRatio(ratio)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(
+            QPainter.RenderHint.Antialiasing, self.viewport.zoom > 0.5
+        )
+        paint(painter)
+        painter.end()
+
+        if len(self._layers) > 256:
+            self._layers.clear()
+        self._layers[key] = pixmap
+        return pixmap
+
     def _paint_graph(self, painter: QPainter) -> None:
         zoom = self.viewport.zoom
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, zoom > 0.5)
 
+        self._paint_folders(painter, zoom)
+        self._paint_edges(painter, zoom)
+        self._paint_nodes(painter, zoom)
+
+    def _paint_folders(self, painter: QPainter, zoom: float) -> None:
         for box in self.graph.folders:
             rect = self._rect(box.tile, box.size)
             if not rect.intersects(self.rect()):
                 continue
 
-            # A drop shadow lifts the group off the workspace.
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(0, 0, 0, 90))
-            painter.drawRoundedRect(rect.translated(0, 3), 9, 9)
+            width = max(1, int(round(rect.width())))
+            height = max(1, int(round(rect.height())))
+            key = ("folder", box.folder, round(zoom, 4), width, height)
 
-            painter.setPen(QPen(QColor(GRAPH_FOLDER_BORDER), 1.2))
-            painter.setBrush(QColor(GRAPH_FOLDER))
-            painter.drawRoundedRect(rect, 8, 8)
+            def draw(
+                layer: QPainter,
+                width=width,
+                height=height,
+                label=box.label,
+                zoom=zoom,
+            ) -> None:
+                local = QRectF(0, 0, width, height)
 
-            # A filled header band makes the group read as one solid object.
-            header_height = TILE * zoom
-            band = QRectF(
-                rect.left() + 1,
-                rect.top() + 1,
-                max(1.0, rect.width() - 2),
-                max(1.0, header_height - 1),
-            )
-            shape = QPainterPath()
-            shape.addRoundedRect(band, 7, 7)
-            clip = QPainterPath()
-            clip.addRect(band)
-            painter.fillPath(
-                shape.intersected(clip), QColor(GRAPH_FOLDER_HEADER)
-            )
+                # A drop shadow lifts the group off the workspace.
+                layer.setPen(Qt.PenStyle.NoPen)
+                layer.setBrush(QColor(0, 0, 0, 90))
+                layer.drawRoundedRect(local.translated(0, 3), 9, 9)
 
-            painter.setPen(QPen(QColor(GRAPH_FOLDER_BORDER), 1))
-            painter.drawLine(
-                QPointF(rect.left() + 1, rect.top() + header_height),
-                QPointF(rect.right() - 1, rect.top() + header_height),
-            )
+                layer.setPen(QPen(QColor(GRAPH_FOLDER_BORDER), 1.2))
+                layer.setBrush(QColor(GRAPH_FOLDER))
+                layer.drawRoundedRect(local, 8, 8)
 
-            if zoom >= LABEL_MIN_ZOOM:
-                font = self._font(10)
-                font.setBold(True)
-                painter.setFont(font)
-                painter.setPen(QColor(TEXT_MUTED))
-                painter.drawText(
-                    QRectF(
-                        rect.left() + 10,
-                        rect.top(),
-                        rect.width() - 20,
-                        header_height,
-                    ),
-                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                    box.label,
+                # A filled header band makes the group read as one solid object.
+                header_height = TILE * zoom
+                band = QRectF(
+                    1, 1, max(1.0, width - 2), max(1.0, header_height - 1)
+                )
+                layer.save()
+                layer.setClipRect(band)
+                layer.setPen(Qt.PenStyle.NoPen)
+                layer.setBrush(QColor(GRAPH_FOLDER_HEADER))
+                layer.drawRoundedRect(
+                    QRectF(0, 0, width, header_height + 8), 8, 8
+                )
+                layer.restore()
+
+                layer.setPen(QPen(QColor(GRAPH_FOLDER_BORDER), 1))
+                layer.drawLine(
+                    QPointF(1, header_height),
+                    QPointF(width - 1, header_height),
                 )
 
+                if zoom >= LABEL_MIN_ZOOM:
+                    font = self._font(10)
+                    font.setBold(True)
+                    layer.setFont(font)
+                    layer.setPen(QColor(TEXT_MUTED))
+                    layer.drawText(
+                        QRectF(10, 0, max(10.0, width - 20), header_height),
+                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                        label,
+                    )
+
+            painter.drawPixmap(
+                int(rect.left()), int(rect.top()), self._layer(key, width, height + 4, draw)
+            )
+
+    def _paint_edges(self, painter: QPainter, zoom: float) -> None:
         painter.setBrush(Qt.BrushStyle.NoBrush)
+        # The routes are axis-aligned: antialiasing them costs several milliseconds a
+        # frame and only softens lines that land on pixel boundaries anyway.
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         for index, edge in enumerate(self.graph.edges):
             source = self._nodes.get(edge.source)
             target = self._nodes.get(edge.target)
@@ -499,6 +590,21 @@ class Canvas(QWidget):
             if not tiles:
                 tiles = [(x1, y1), (x2, y1), (x2, y2)]
 
+            # Off-screen edges cost as much to submit as visible ones.
+            left, top, right, bottom = x1, y1, x1, y1
+            for px, py in tiles:
+                sx = self._screen_x(px)
+                sy = self._screen_y(py)
+                left, right = min(left, sx), max(right, sx)
+                top, bottom = min(top, sy), max(bottom, sy)
+            if (
+                right < -2
+                or left > self.width() + 2
+                or bottom < -2
+                or top > self.height() + 2
+            ):
+                continue
+
             points = [
                 QPointF(self._screen_x(px), self._screen_y(py)) for px, py in tiles
             ]
@@ -511,11 +617,11 @@ class Canvas(QWidget):
                 if abs(tiles[-2][1] - tiles[-1][1]) <= 1e-6:
                     points[-2] = QPointF(points[-2].x(), y2)
 
-            path = QPainterPath(points[0])
-            for point in points[1:]:
-                path.lineTo(point)
-            painter.drawPath(path)
+            painter.drawPolyline(QPolygonF(points))
+
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             self._paint_arrow(painter, points[-2], points[-1], zoom, pen.color())
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
             if edge.label and zoom >= LABEL_MIN_ZOOM:
                 font = self._font(8)
@@ -523,58 +629,76 @@ class Canvas(QWidget):
                 painter.setPen(QColor(GRAPH_EDGE_LABEL))
                 painter.drawText(QPointF(x1 + 8 * zoom, y1 - 4 * zoom), edge.label)
 
+    def _paint_nodes(self, painter: QPainter, zoom: float) -> None:
         header = TILE * zoom * NODE_HEADER_TILES
         for node in self.graph.nodes:
             rect = self._rect(node.tile, node.size)
             if not rect.intersects(self.rect()):
                 continue
 
+            width = max(1, int(round(rect.width())))
+            height = max(1, int(round(rect.height())))
+            key = ("node", node.path, round(zoom, 4), width, height)
+            painter.drawPixmap(
+                int(rect.left()),
+                int(rect.top()),
+                self._layer(
+                    key,
+                    width,
+                    height,
+                    self._node_layer(node, zoom, width, height, header),
+                ),
+            )
+
+    def _node_layer(self, node, zoom: float, width: int, height: int, header: float):
+        """How one node's frame is drawn, at its own size."""
+
+        def draw(layer: QPainter) -> None:
+            rect = QRectF(0, 0, width, height)
+
             if node.kind == "import":
                 # An external dependency: a chip, not an editor.
-                painter.setPen(
+                layer.setPen(
                     QPen(QColor(GRAPH_IMPORT_BORDER), 1, Qt.PenStyle.DashLine)
                 )
-                painter.setBrush(QColor(GRAPH_IMPORT))
+                layer.setBrush(QColor(GRAPH_IMPORT))
                 radius = min(rect.height() / 2, 12.0)
-                painter.drawRoundedRect(rect, radius, radius)
+                layer.drawRoundedRect(rect, radius, radius)
 
                 if zoom >= LABEL_MIN_ZOOM:
                     font = self._font(9)
-                    painter.setFont(font)
-                    painter.setPen(QColor(GRAPH_IMPORT_TEXT))
+                    layer.setFont(font)
+                    layer.setPen(QColor(GRAPH_IMPORT_TEXT))
                     metrics = QFontMetricsF(font)
                     label = metrics.elidedText(
                         node.label,
                         Qt.TextElideMode.ElideRight,
                         max(10.0, rect.width() - 16),
                     )
-                    painter.drawText(
-                        rect, Qt.AlignmentFlag.AlignCenter, label
-                    )
-                continue
+                    layer.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+                return
 
-            painter.setPen(QPen(QColor(GRAPH_NODE_BORDER), 1))
-            painter.setBrush(QColor(GRAPH_NODE))
-            painter.drawRoundedRect(rect, 6, 6)
+            layer.setPen(QPen(QColor(GRAPH_NODE_BORDER), 1))
+            layer.setBrush(QColor(GRAPH_NODE))
+            layer.drawRoundedRect(rect, 6, 6)
 
             if zoom >= LABEL_MIN_ZOOM:
                 font = self._font(9)
-                painter.setFont(font)
-                painter.setPen(QColor(TEXT_MUTED))
+                layer.setFont(font)
+                layer.setPen(QColor(TEXT_MUTED))
                 metrics = QFontMetricsF(font)
                 label = metrics.elidedText(
-                    node.label, Qt.TextElideMode.ElideMiddle, max(10.0, rect.width() - 20)
+                    node.label,
+                    Qt.TextElideMode.ElideMiddle,
+                    max(10.0, rect.width() - 20),
                 )
-                painter.drawText(
-                    QRectF(
-                        rect.left() + 10,
-                        rect.top() + 2,
-                        rect.width() - 20,
-                        max(1.0, header - 3),
-                    ),
+                layer.drawText(
+                    QRectF(10, 2, max(10.0, width - 20), max(1.0, header - 3)),
                     Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                     label,
                 )
+
+        return draw
 
     def _paint_arrow(
         self, painter: QPainter, previous: QPointF, tip: QPointF, zoom: float, colour
