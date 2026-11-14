@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QShowEvent
+from PySide6.QtGui import QAction, QActionGroup, QShowEvent
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ucode.ui.modes import ViewMode
 from ucode.ui.panel_toggle import PanelToggle
 from ucode.ui.side_panel import SidePanel
 from ucode.ui.sidebar import SideBar
@@ -38,6 +39,7 @@ class MainWindow(QMainWindow):
 
         self._split_applied = False
         self.folder: Path | None = None
+        self.mode: ViewMode = ViewMode.TEXT
 
         self._build_menu_bar()
         self._build_central_area()
@@ -50,6 +52,31 @@ class MainWindow(QMainWindow):
         menu_bar = self.menuBar()
         self.file_menu: QMenu = menu_bar.addMenu("&File")
         self.edit_menu: QMenu = menu_bar.addMenu("&Edit")
+        self.mode_menu: QMenu = menu_bar.addMenu("&Mode")
+        self.run_menu: QMenu = menu_bar.addMenu("&Run")
+
+        self.mode_group = QActionGroup(self)
+        self.mode_group.setExclusive(True)
+        self.mode_actions: dict[ViewMode, QAction] = {}
+
+        for mode, label in (
+            (ViewMode.TEXT, "Text"),
+            (ViewMode.NODE_FILES, "Node (Files)"),
+            (ViewMode.NODE_CODEFLOW, "Node (Codeflow)"),
+        ):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.triggered.connect(lambda _checked=False, m=mode: self.set_mode(m))
+            self.mode_group.addAction(action)
+            self.mode_menu.addAction(action)
+            self.mode_actions[mode] = action
+
+        self.set_mode(ViewMode.TEXT)
+
+    def set_mode(self, mode: ViewMode) -> None:
+        """Choose how the project is presented and reflect it in the menu."""
+        self.mode = mode
+        self.mode_actions[mode].setChecked(True)
 
     def _build_central_area(self) -> None:
         central = QWidget(self)
