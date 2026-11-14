@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from math import hypot
 
 from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, Signal
@@ -22,7 +23,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 from ucode.core.graph import FileGraph
-from ucode.core.routing import plan_route
+from ucode.core.routing import route
 from ucode.core.tile import TILE
 from ucode.core.viewport import MIN_ZOOM, Viewport
 from ucode.ui.node_editor import NodeEditor
@@ -93,7 +94,8 @@ class Canvas(QWidget):
         self._drag_folder_members: list = []
 
         # Where each edge runs, planned in tiles so panning and zooming keep it valid.
-        self._routes: list[tuple[str, float, float, float]] = []
+        self._routes: list[list[tuple[float, float]]] = []
+        self._routes_built = 0.0
 
         # A middle press that started on a node body: paste if it stays put, pan if not.
         self._pan_press: QPointF | None = None
@@ -213,9 +215,15 @@ class Canvas(QWidget):
         top = node.tile[1] + NODE_HEADER_TILES + 1 / TILE
         return top + (max(1, line) - 0.5) * (LINE_PX / TILE)
 
+    def _replan(self) -> None:
+        """Re-plan while dragging, at a rate that cannot make the drag feel slow."""
+        if time.monotonic() - self._routes_built >= 0.08:
+            self._rebuild_routes()
+
     def _rebuild_routes(self) -> None:
         """Plan every edge so no line has to cross a node box."""
         self._routes = []
+        self._routes_built = time.monotonic()
         if self.graph is None:
             return
 
@@ -228,15 +236,19 @@ class Canvas(QWidget):
             source = self._nodes.get(edge.source)
             target = self._nodes.get(edge.target)
             if source is None or target is None:
-                self._routes.append(("v", 0.0, 0.0, 0.0))
+                self._routes.append([])
                 continue
 
             self._routes.append(
-                plan_route(
-                    source.tile[0] + source.size[0],
-                    self._line_tile_y(source, edge.source_line),
-                    target.tile[0],
-                    self._line_tile_y(target, edge.target_line),
+                route(
+                    (
+                        source.tile[0] + source.size[0],
+                        self._line_tile_y(source, edge.source_line),
+                    ),
+                    (
+                        target.tile[0],
+                        self._line_tile_y(target, edge.target_line),
+                    ),
                     obstacles,
                 )
             )
@@ -331,7 +343,7 @@ class Canvas(QWidget):
         for node, node_start in self._drag_folder_members:
             node.tile = (node_start[0] + shift[0], node_start[1] + shift[1])
 
-        self._rebuild_routes()
+        self._replan()
         self._sync_editors()
         self.update()
 
@@ -363,7 +375,7 @@ class Canvas(QWidget):
             self._drag_tile[0] + delta.x() / scale,
             self._drag_tile[1] + delta.y() / scale,
         )
-        self._rebuild_routes()
+        self._replan()
         self._sync_editors()
         self.update()
 
@@ -475,29 +487,21 @@ class Canvas(QWidget):
             x2 = end.left() - 2.0
             y2 = self._anchor_y(target, edge.target_line, zoom)
 
-            plan = self._routes[index] if index < len(self._routes) else None
-            if plan is None:
-                points = [QPointF(x1, y1), QPointF(x2, y1), QPointF(x2, y2)]
-            elif plan[0] == "v":
-                corridor = self._screen_x(plan[1])
-                points = [
-                    QPointF(x1, y1),
-                    QPointF(corridor, y1),
-                    QPointF(corridor, y2),
-                    QPointF(x2, y2),
-                ]
-            else:
-                band = self._screen_y(plan[1])
-                out_x = self._screen_x(plan[2])
-                in_x = self._screen_x(plan[3])
-                points = [
-                    QPointF(x1, y1),
-                    QPointF(out_x, y1),
-                    QPointF(out_x, band),
-                    QPointF(in_x, band),
-                    QPointF(in_x, y2),
-                    QPointF(x2, y2),
-                ]
+            tiles = self._routes[index] if index < len(self._routes) else None
+            if not tiles:
+                tiles = [(x1, y1), (x2, y1), (x2, y2)]
+
+            points = [
+                QPointF(self._screen_x(px), self._screen_y(py)) for px, py in tiles
+            ]
+            # Keep both ends on the exact line they belong to at this zoom.
+            points[0] = QPointF(x1, y1)
+            points[-1] = QPointF(x2, y2)
+            if len(points) >= 3:
+                if abs(tiles[1][1] - tiles[0][1]) <= 1e-6:
+                    points[1] = QPointF(points[1].x(), y1)
+                if abs(tiles[-2][1] - tiles[-1][1]) <= 1e-6:
+                    points[-2] = QPointF(points[-2].x(), y2)
 
             path = QPainterPath(points[0])
             for point in points[1:]:
@@ -748,6 +752,7 @@ class Canvas(QWidget):
                 self._drag_folder_from is not None
                 and event.position() != self._drag_folder_from
             )
+            self._rebuild_routes()
             self._drag_folder = None
             self._drag_folder_from = None
             self._drag_folder_tile = None
@@ -760,6 +765,7 @@ class Canvas(QWidget):
 
         if self._drag_node is not None:
             moved = self._drag_from is not None and event.position() != self._drag_from
+            self._rebuild_routes()
             self._drag_node = None
             self._drag_from = None
             self._drag_tile = None

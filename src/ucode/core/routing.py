@@ -1,20 +1,22 @@
 """Orthogonal edge routing that keeps edges out of the node boxes.
 
-The canvas paints edges beneath the node editors, so a line crossing a node would vanish
-behind its code field. This module picks a corridor that no line has to cross a box for:
-a vertical channel between the two nodes when there is one, otherwise a horizontal
-channel above or below whatever is in the way.
-
-Coordinates are in tiles, so a plan survives panning and zooming.
+The canvas paints edges beneath the nodes, so a line crossing a node disappears behind
+its code field. This module searches the free channels between the boxes — the lines
+along their edges — and returns the cheapest orthogonal path that touches none of them
+from the inside. Coordinates are in tiles, so a route survives panning and zooming.
 """
 
 from __future__ import annotations
 
+import heapq
+
 Point = tuple[float, float]
 Rect = tuple[float, float, float, float]  # x, y, width, height
-Plan = tuple[str, float, float, float]  # ("v", x, 0, 0) or ("h", y, xa, xb)
 
 EPSILON = 1e-6
+TURN_COST = 0.8  # tiles of extra length a bend is allowed to be worth
+HORIZONTAL = 1
+VERTICAL = 2
 
 
 def crosses(a: Point, b: Point, rect: Rect) -> bool:
@@ -45,66 +47,152 @@ def is_clear(points: list[Point], obstacles: list[Rect]) -> bool:
     )
 
 
-def points_for(plan: Plan, x1: float, y1: float, x2: float, y2: float) -> list[Point]:
-    """Turn a plan into a polyline for these endpoints."""
-    kind, first, second, third = plan
+def _simplify(points: list[Point]) -> list[Point]:
+    """Drop the points that only repeat a direction."""
+    if len(points) < 3:
+        return points
 
-    if kind == "v":
-        return [(x1, y1), (first, y1), (first, y2), (x2, y2)]
+    kept = [points[0]]
+    for index in range(1, len(points) - 1):
+        before, here, after = kept[-1], points[index], points[index + 1]
+        if (abs(before[0] - here[0]) <= EPSILON and abs(here[0] - after[0]) <= EPSILON) or (
+            abs(before[1] - here[1]) <= EPSILON and abs(here[1] - after[1]) <= EPSILON
+        ):
+            continue
+        kept.append(here)
 
-    return [
-        (x1, y1),
-        (second, y1),
-        (second, first),
-        (third, first),
-        (third, y2),
-        (x2, y2),
-    ]
+    kept.append(points[-1])
+    return kept
 
 
-def plan_route(
+def _search(
     x1: float,
     y1: float,
     x2: float,
     y2: float,
     obstacles: list[Rect],
-    margin: float = 0.35,
-) -> Plan:
-    """Choose the cheapest corridor that reaches the target without crossing a box."""
-    if not obstacles:
-        return ("v", (x1 + x2) / 2, 0.0, 0.0)
+    pad: float,
+) -> list[Point] | None:
+    low_x, high_x = min(x1, x2) - pad, max(x1, x2) + pad
+    low_y, high_y = min(y1, y2) - pad, max(y1, y2) + pad
 
-    # A vertical channel between the two nodes: the plain, expected path.
-    if x2 - x1 > margin * 2:
-        middle = (x1 + x2) / 2
-        xs = {round(middle, 3), round(x1 + margin, 3), round(x2 - margin, 3)}
-        for x, _, width, _ in obstacles:
-            xs.add(round(x - margin, 3))
-            xs.add(round(x + width + margin, 3))
-
-        candidates = sorted(
-            (x for x in xs if x1 + margin <= x <= x2 - margin),
-            key=lambda x: abs(x - middle),
+    # Anything outside the search region cannot be crossed anyway, so only the boxes
+    # inside it take part in the search.
+    boxes = [
+        rect
+        for rect in obstacles
+        if not (
+            rect[0] + rect[2] < low_x
+            or rect[0] > high_x
+            or rect[1] + rect[3] < low_y
+            or rect[1] > high_y
         )
-        for x in candidates:
-            plan: Plan = ("v", x, 0.0, 0.0)
-            if is_clear(points_for(plan, x1, y1, x2, y2), obstacles):
-                return plan
+    ]
 
-    # Otherwise go around: out of the source, along a free band, into the target.
-    bands = {round((y1 + y2) / 2, 3), round(max(y1, y2) + margin, 3)}
-    for _, y, _, height in obstacles:
-        bands.add(round(y - margin, 3))
-        bands.add(round(y + height + margin, 3))
+    xs = {x1, x2}
+    ys = {y1, y2}
+    for x, y, width, height in boxes:
+        if x + width < low_x or x > high_x or y + height < low_y or y > high_y:
+            continue
+        xs.add(x)
+        xs.add(x + width)
+        ys.add(y)
+        ys.add(y + height)
 
-    xa = x1 + margin
-    xb = x2 - margin
-    middle_y = (y1 + y2) / 2
+    xsorted = sorted(v for v in xs if low_x <= v <= high_x)
+    ysorted = sorted(v for v in ys if low_y <= v <= high_y)
+    if x1 not in xsorted or x2 not in xsorted or y1 not in ysorted or y2 not in ysorted:
+        return None
 
-    for band in sorted(bands, key=lambda y: abs(y - middle_y)):
-        plan = ("h", band, xa, xb)
-        if is_clear(points_for(plan, x1, y1, x2, y2), obstacles):
-            return plan
+    xi = {x: index for index, x in enumerate(xsorted)}
+    yi = {y: index for index, y in enumerate(ysorted)}
 
-    # Nothing is free: fall back to the plain elbow rather than looping forever.
-    return ("v", (x1 + x2) / 2, 0.0, 0.0)
+    def inside(px: float, py: float) -> bool:
+        return any(
+            x + EPSILON < px < x + width - EPSILON
+            and y + EPSILON < py < y + height - EPSILON
+            for x, y, width, height in boxes
+        )
+
+    def free(ax: float, ay: float, bx: float, by: float) -> bool:
+        return not any(crosses((ax, ay), (bx, by), rect) for rect in boxes)
+
+    start = (xi[x1], yi[y1], 0)
+    goal = (xi[x2], yi[y2])
+
+    def remaining(column: int, row: int) -> float:
+        return abs(xsorted[column] - x2) + abs(ysorted[row] - y2)
+
+    best: dict[tuple[int, int, int], float] = {start: 0.0}
+    came: dict[tuple[int, int, int], tuple[int, int, int]] = {}
+    queue: list[tuple[float, float, int, int, int]] = [
+        (remaining(xi[x1], yi[y1]), 0.0, xi[x1], yi[y1], 0)
+    ]
+
+    while queue:
+        _, cost, column, row, direction = heapq.heappop(queue)
+        state = (column, row, direction)
+        if cost > best.get(state, float("inf")):
+            continue
+        if (column, row) == goal:
+            path = []
+            while state in came:
+                path.append((xsorted[state[0]], ysorted[state[1]]))
+                state = came[state]
+            path.append((xsorted[state[0]], ysorted[state[1]]))
+            path.reverse()
+            return _simplify(path)
+
+        px, py = xsorted[column], ysorted[row]
+        steps = []
+        if column > 0:
+            steps.append((column - 1, row, HORIZONTAL))
+        if column + 1 < len(xsorted):
+            steps.append((column + 1, row, HORIZONTAL))
+        if row > 0:
+            steps.append((column, row - 1, VERTICAL))
+        if row + 1 < len(ysorted):
+            steps.append((column, row + 1, VERTICAL))
+
+        for next_column, next_row, next_direction in steps:
+            qx, qy = xsorted[next_column], ysorted[next_row]
+            if inside(qx, qy) or not free(px, py, qx, qy):
+                continue
+
+            step = abs(qx - px) + abs(qy - py)
+            turn = TURN_COST if direction and direction != next_direction else 0.0
+            total = cost + step + turn
+            next_state = (next_column, next_row, next_direction)
+
+            if total < best.get(next_state, float("inf")) - EPSILON:
+                best[next_state] = total
+                came[next_state] = state
+                heapq.heappush(
+                    queue,
+                    (
+                        total + remaining(next_column, next_row),
+                        total,
+                        next_column,
+                        next_row,
+                        next_direction,
+                    ),
+                )
+
+    return None
+
+
+def route(start: Point, end: Point, obstacles: list[Rect]) -> list[Point]:
+    """The cheapest crossing-free orthogonal path from ``start`` to ``end``."""
+    x1, y1 = start
+    x2, y2 = end
+
+    if not obstacles:
+        return [(x1, y1), (x2, y1), (x2, y2)]
+
+    for pad in (2.0, 8.0, 24.0):
+        points = _search(x1, y1, x2, y2, obstacles, pad)
+        if points:
+            return points
+
+    # Nothing got through: fall back to the plain elbow rather than looping forever.
+    return [(x1, y1), (x2, y1), (x2, y2)]
