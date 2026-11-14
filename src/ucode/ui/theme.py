@@ -24,6 +24,13 @@ BG_CONTROL_PRESSED = "#313743"
 # -- lines and text ---------------------------------------------------
 BORDER = "#272b34"
 BORDER_STRONG = "#333a46"
+# -- node graph -------------------------------------------------------
+GRAPH_FOLDER = "#1c2027"
+GRAPH_FOLDER_BORDER = "#2c3340"
+GRAPH_NODE = "#252b35"
+GRAPH_NODE_BORDER = "#3a4352"
+GRAPH_EDGE = "#4c5768"
+
 TEXT = "#d7dce5"
 TEXT_MUTED = "#8b93a1"
 ACCENT = "#4c8dff"

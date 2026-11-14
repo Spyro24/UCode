@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from ucode.core.config import Config
+from ucode.core.graph import FileGraph, build_file_graph
 from ucode.core.modes import ViewMode
 from ucode.ui.file_tree import FileTree
 from ucode.ui.panel_toggle import PanelToggle
@@ -43,6 +44,8 @@ class MainWindow(QMainWindow):
         self.folder: Path | None = None
         self.config = Config.load()
         self.mode: ViewMode = self.config.mode
+        self.graph: FileGraph | None = None
+        self._graph_framed = False
 
         self._build_menu_bar()
         self._build_central_area()
@@ -87,6 +90,8 @@ class MainWindow(QMainWindow):
         if persist and self.config.mode is not mode:
             self.config.mode = mode
             self._save_config()
+
+        self._sync_graph()
 
     # -- layout --------------------------------------------------------
     def _build_central_area(self) -> None:
@@ -154,6 +159,10 @@ class MainWindow(QMainWindow):
         self.side_bar.folder_button.setChecked(True)
         self.work_area.show_canvas()
 
+        self.graph = build_file_graph(path)
+        self._graph_framed = False
+        self._sync_graph()
+
         if self.config.project != str(path):
             self.config.project = str(path)
             self._save_config()
@@ -166,6 +175,19 @@ class MainWindow(QMainWindow):
         candidate = Path(self.config.project)
         if candidate.is_dir():
             self.set_folder(candidate)
+
+    def _sync_graph(self) -> None:
+        """Show the file graph only in the view that asks for it."""
+        # set_mode runs while the menu is built, before the work area exists.
+        if not hasattr(self, "work_area"):
+            return
+
+        canvas = self.work_area.canvas
+        canvas.set_graph(self.graph if self.mode is ViewMode.NODE_FILES else None)
+
+        if canvas.graph is not None and not self._graph_framed:
+            self._graph_framed = True
+            canvas.frame_graph()
 
     def _save_config(self) -> None:
         try:
