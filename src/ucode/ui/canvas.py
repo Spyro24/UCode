@@ -29,6 +29,8 @@ from ucode.ui.theme import (
     BG_SURFACE,
     GRAPH_ARROW,
     GRAPH_EDGE,
+    GRAPH_EDGE_CREATE,
+    GRAPH_EDGE_LABEL,
     GRAPH_FOLDER,
     GRAPH_FOLDER_BORDER,
     GRAPH_IMPORT,
@@ -48,6 +50,7 @@ EDITOR_MIN_ZOOM = 0.5  # below this the node bodies are not instantiated
 LABEL_MIN_ZOOM = 0.25  # names stay readable further out than the code does
 PAN_THRESHOLD_PX = 5  # a middle press that moves less than this is a paste, not a drag
 FONT_PIXELS = 11
+LINE_GROWTH = 12.8 / 11  # measured: line spacing per pixel of font size
 
 
 class Canvas(QWidget):
@@ -183,6 +186,23 @@ class Canvas(QWidget):
             size[1] * TILE * self.viewport.zoom,
         )
 
+    def _line_height(self, zoom: float) -> float:
+        """The rendered height of a text line at this zoom, to hit a line exactly."""
+        return LINE_GROWTH * max(5, int(FONT_PIXELS * zoom))
+
+    def _anchor_y(self, node, line: int, zoom: float) -> float:
+        """Vertical position of ``line`` (1-based) inside a node."""
+        rect = self._rect(node.tile, node.size)
+        if node.kind != "file":
+            return rect.center().y()
+
+        height = self._line_height(zoom)
+        top = rect.top() + TILE * zoom * NODE_HEADER_TILES + 1
+        bottom = rect.bottom() - 1
+        y = top + (max(1, line) - 0.5) * height
+
+        return min(max(y, top + height / 2), max(top + height / 2, bottom - height / 2))
+
     def _font(self, points: float) -> QFont:
         font = QFont(self.font())
         font.setPointSizeF(max(6.0, points * self.viewport.zoom))
@@ -232,12 +252,15 @@ class Canvas(QWidget):
             if source is None or target is None:
                 continue
 
-            # Dependencies on something outside the project are drawn as dashed flows.
+            # Dependencies on something outside the project are drawn as dashed flows;
+            # object creation gets its own colour and a label.
             external = target.kind == "import"
-            pen = QPen(
-                QColor(GRAPH_IMPORT_EDGE if external else GRAPH_EDGE),
-                max(1.0, 1.4 * zoom),
-            )
+            if edge.kind == "creates":
+                colour = GRAPH_EDGE_CREATE
+            else:
+                colour = GRAPH_IMPORT_EDGE if external else GRAPH_EDGE
+
+            pen = QPen(QColor(colour), max(1.0, 1.4 * zoom))
             if external:
                 pen.setStyle(Qt.PenStyle.DashLine)
                 pen.setDashPattern([4.0, 3.0])
@@ -245,9 +268,12 @@ class Canvas(QWidget):
 
             start = self._rect(source.tile, source.size)
             end = self._rect(target.tile, target.size)
-            # Stop short of the target so the arrowhead sits in the gap.
-            x1, y1 = start.right(), start.center().y()
-            x2, y2 = end.left() - 2.0, end.center().y()
+            # Both ends sit on the line they belong to, and stop short of the target
+            # so the arrowhead lands in the gap rather than under the node.
+            x1 = start.right()
+            y1 = self._anchor_y(source, edge.source_line, zoom)
+            x2 = end.left() - 2.0
+            y2 = self._anchor_y(target, edge.target_line, zoom)
             offset = TILE * zoom * 0.8
 
             points = [QPointF(x1, y1)]
@@ -270,6 +296,12 @@ class Canvas(QWidget):
                 path.lineTo(point)
             painter.drawPath(path)
             self._paint_arrow(painter, points[-2], points[-1], zoom, pen.color())
+
+            if edge.label and zoom >= LABEL_MIN_ZOOM:
+                font = self._font(8)
+                painter.setFont(font)
+                painter.setPen(QColor(GRAPH_EDGE_LABEL))
+                painter.drawText(QPointF(x1 + 8 * zoom, y1 - 4 * zoom), edge.label)
 
         header = TILE * zoom * NODE_HEADER_TILES
         for node in self.graph.nodes:

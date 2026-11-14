@@ -35,7 +35,11 @@ GRAPH_IMPORT = "#1e2a33"
 GRAPH_IMPORT_BORDER = "#3a5a68"
 GRAPH_IMPORT_TEXT = "#7fb6cc"
 GRAPH_IMPORT_EDGE = "#3f6272"
+GRAPH_EDGE_CREATE = "#5b8def"
+GRAPH_EDGE_LABEL = "#8fb3ff"
 BG_NODE_EDITOR = "#20252e"
+GUTTER_BG = "#1c2028"
+GUTTER_TEXT = "#5a6373"
 
 # -- syntax -----------------------------------------------------------
 SYNTAX_KEYWORD = "#c678dd"

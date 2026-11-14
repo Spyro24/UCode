@@ -1,8 +1,11 @@
 """Reading the links a source file declares: Python imports and C includes.
 
-Only what the graph needs to connect files: the names a file pulls in, not full parsing.
-Python references keep their full dotted path (``pygame.mouse.get_pos``), so each import
-can become its own node.
+Only what the graph needs: the names a file pulls in and the line they appear on, so an
+edge can start and end on the exact line it belongs to.
+
+Each reference is ``(name, line, member)``. ``name`` keeps its full dotted path, so every
+import can become its own node; ``member`` is the symbol imported by a ``from`` statement,
+or None for a whole-module import.
 """
 
 from __future__ import annotations
@@ -12,19 +15,21 @@ import re
 _INCLUDE = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.MULTILINE)
 _SYSTEM_INCLUDE = re.compile(r"^\s*#\s*include\s+<([^>]+)>", re.MULTILINE)
 
+Reference = tuple[str, int, "str | None"]
 
-def python_imports(text: str) -> list[str]:
-    """Module and member paths imported at any indent level."""
-    names: list[str] = []
 
-    for line in text.splitlines():
+def python_imports(text: str) -> list[Reference]:
+    """Module and member paths imported at any indent level, with their line."""
+    names: list[Reference] = []
+
+    for number, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
 
         if stripped.startswith("import "):
             for part in stripped[len("import ") :].split(","):
                 module = part.split(" as ")[0].strip()
                 if module:
-                    names.append(module)
+                    names.append((module, number, None))
 
         elif stripped.startswith("from "):
             body = stripped[len("from ") :]
@@ -41,22 +46,30 @@ def python_imports(text: str) -> list[str]:
 
             if relative and not base:
                 # ``from . import helpers`` pulls in sibling modules directly.
-                names.extend(members)
+                for member in members:
+                    names.append((member, number, None))
             elif not members:
                 if base:
-                    names.append(base)
+                    names.append((base, number, None))
             else:
                 for member in members:
-                    names.append(f"{base}.{member}" if base else member)
+                    names.append((f"{base}.{member}" if base else member, number, member))
 
     return names
 
 
-def c_includes(text: str) -> list[str]:
+def _with_lines(pattern: re.Pattern[str], text: str) -> list[Reference]:
+    return [
+        (match.group(1), text.count("\n", 0, match.start()) + 1, None)
+        for match in pattern.finditer(text)
+    ]
+
+
+def c_includes(text: str) -> list[Reference]:
     """Quoted include targets, which are the ones that can live in the project."""
-    return _INCLUDE.findall(text)
+    return _with_lines(_INCLUDE, text)
 
 
-def c_system_includes(text: str) -> list[str]:
+def c_system_includes(text: str) -> list[Reference]:
     """Angle-bracket includes: the toolchain's headers, never project files."""
-    return _SYSTEM_INCLUDE.findall(text)
+    return _with_lines(_SYSTEM_INCLUDE, text)
