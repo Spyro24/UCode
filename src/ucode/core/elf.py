@@ -57,6 +57,7 @@ class ElfHeader:
     machine: str
     entry: int
     sections: int
+    machine_id: int = 0  # e_machine, for choosing a disassembler
 
     def summary(self, path: Path) -> str:
         return (
@@ -92,6 +93,7 @@ def header(path: Path) -> ElfHeader | None:
         machine=_MACHINES.get(machine, f"machine {machine}"),
         entry=entry,
         sections=shnum,
+        machine_id=machine,
     )
 
 

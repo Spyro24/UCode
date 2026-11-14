@@ -25,6 +25,19 @@ from ucode.core.graph import (
 
 MAX_FUNCTIONS = 200  # past this the graph is no longer something a person can read
 
+# The architectures objdump can be pointed at, and the e_machine each one comes from.
+ARCHITECTURES: tuple[tuple[str, str, int], ...] = (
+    ("x86-64", "i386:x86-64", 62),
+    ("x86 (i386)", "i386", 3),
+    ("ARM", "arm", 40),
+    ("AArch64", "aarch64", 183),
+    ("MIPS", "mips", 8),
+    ("PowerPC", "powerpc", 20),
+    ("RISC-V 32", "riscv:rv32", 243),
+    ("RISC-V 64", "riscv:rv64", 243),
+)
+
+
 _HEADER = re.compile(r"^([0-9a-fA-F]+) <([^>]+)>:\s*$")
 _INSN = re.compile(r"^\s*([0-9a-fA-F]+):\s+(.+?)\s*$")
 _TARGET = re.compile(r"<([^>+]+)")
@@ -46,11 +59,12 @@ def available() -> bool:
     return shutil.which("objdump") is not None
 
 
-def run_objdump(path: Path, timeout: float = 20.0) -> str:
+def run_objdump(path: Path, machine: str | None = None, timeout: float = 20.0) -> str:
     """The disassembly text for ``path``, or "" when objdump cannot provide it."""
+    target = ["-m", machine] if machine else []
     for args in (
-        ["objdump", "-d", "--no-show-raw-insn", str(path)],
-        ["objdump", "-d", str(path)],
+        ["objdump", "-d", "--no-show-raw-insn", *target, str(path)],
+        ["objdump", "-d", *target, str(path)],
     ):
         try:
             done = subprocess.run(
@@ -131,13 +145,21 @@ def _pack(sizes: list[tuple[float, float]], gap: float) -> tuple[list, tuple[flo
     return _pack_columns(sizes, gap)
 
 
-def build_graph(path: Path) -> tuple[FileGraph | None, str]:
+def build_graph(
+    path: Path, machine: str | None = None
+) -> tuple[FileGraph | None, str]:
     """A call graph of the binary's functions; the second value explains a failure."""
     if not available():
         return None, "objdump is not installed (binutils), so there is nothing to disassemble."
 
-    text = run_objdump(path)
+    text = run_objdump(path, machine)
     if not text:
+        if machine:
+            name = next(
+                (label for label, target, _ in ARCHITECTURES if target == machine),
+                machine,
+            )
+            return None, f"objdump could not disassemble {path.name} as {name}."
         return None, f"objdump could not read {path.name}."
 
     functions = parse(text)

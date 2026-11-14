@@ -15,6 +15,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -234,15 +235,58 @@ class MainWindow(QMainWindow):
             return "disasm"
         return None
 
+    def _ask_architecture(self, path: Path) -> str | None:
+        """Which machine objdump should read the binary as; None when cancelled."""
+        detected = self._detected_architecture(path)
+        labels = [label for label, _target, _id in disasm.ARCHITECTURES]
+        # Mark the one the header claims, so overriding it is a deliberate choice.
+        names = [
+            f"{label}   (from the ELF header)" if label == detected else label
+            for label in labels
+        ]
+        current = labels.index(detected) if detected in labels else 0
+
+        choice, accepted = QInputDialog.getItem(
+            self,
+            "Disassembly",
+            f"Architecture to read {path.name} as:",
+            names,
+            current,
+            False,
+        )
+        if not accepted:
+            return None
+
+        return disasm.ARCHITECTURES[names.index(choice)][1]
+
+    @staticmethod
+    def _detected_architecture(path: Path) -> str | None:
+        """The architecture the ELF header claims, as one of the listed names."""
+        info = elf.header(path)
+        if info is None:
+            return None
+
+        for label, _target, machine_id in disasm.ARCHITECTURES:
+            if machine_id != info.machine_id:
+                continue
+            if machine_id == 243:  # RISC-V 32 and 64 share e_machine
+                return "RISC-V 64" if info.bits == 64 else "RISC-V 32"
+            return label
+
+        return None
+
     def show_file(self, path: Path, view: str) -> None:
         """Open a lone file in the view that was chosen for it."""
         note = ""
         if view == "disasm":
-            graph, note = disasm.build_graph(path)
+            machine = self._ask_architecture(path)
+            if machine is None:
+                return
+            graph, note = disasm.build_graph(path, machine)
             if graph is None:
                 QMessageBox.warning(self, "Disassembly", note)
                 return
-            factory = lambda: disasm.build_graph(path)[0]  # noqa: E731
+            factory = lambda: disasm.build_graph(path, machine)[0]  # noqa: E731
         elif view == "hex":
             graph = elf.build_hex_graph(path)
             factory = lambda: elf.build_hex_graph(path)  # noqa: E731
