@@ -1,4 +1,4 @@
-"""The work area: the editor with the console beneath it."""
+"""The work area: the infinite viewport with the console beneath it."""
 
 from __future__ import annotations
 
@@ -6,21 +6,14 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QSplitter, QVBoxLayout, QWidget
 
+from ucode.ui.canvas import Canvas
 from ucode.ui.console import Console
 
 
-class EditorArea(QWidget):
-    """Placeholder for the code editor. Empty until the editor lands."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("editorArea")
-
-
 class WorkArea(QWidget):
-    """Editor on top, console underneath, both resizable.
+    """Viewport on top, console underneath, both resizable.
 
-    The editor takes the remaining height and the console keeps its three-tile default
+    The viewport takes the remaining height and the console keeps its three-tile default
     height at the bottom.
     """
 
@@ -34,10 +27,10 @@ class WorkArea(QWidget):
         self.splitter.setHandleWidth(1)
         self.splitter.setChildrenCollapsible(False)
 
-        self.editor = EditorArea(self.splitter)
+        self.canvas = Canvas(self.splitter)
         self.console = Console(self.splitter)
 
-        self.splitter.addWidget(self.editor)
+        self.splitter.addWidget(self.canvas)
         self.splitter.addWidget(self.console)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)
