@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 
 _INCLUDE = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.MULTILINE)
+_SYSTEM_INCLUDE = re.compile(r"^\s*#\s*include\s+<([^>]+)>", re.MULTILINE)
 
 
 def python_imports(text: str) -> list[str]:
@@ -23,8 +24,16 @@ def python_imports(text: str) -> list[str]:
                     names.append(module.split(".")[0])
         elif stripped.startswith("from "):
             body = stripped[len("from ") :]
-            module = body.split(" import ")[0].strip()
-            if module:
+            module, _, imported = body.partition(" import ")
+            module = module.strip()
+
+            if not module.lstrip("."):
+                # ``from . import helpers`` pulls in modules, not a module member.
+                for part in imported.strip("()").split(","):
+                    name = part.split(" as ")[0].strip()
+                    if name and name != "*":
+                        names.append(name)
+            elif module:
                 # Relative imports point at the file's own package; keep the leaf name.
                 names.append(module.lstrip(".").split(".")[-1])
 
@@ -34,3 +43,8 @@ def python_imports(text: str) -> list[str]:
 def c_includes(text: str) -> list[str]:
     """Quoted include targets, which are the ones that can live in the project."""
     return _INCLUDE.findall(text)
+
+
+def c_system_includes(text: str) -> list[str]:
+    """Angle-bracket includes: the toolchain's headers, never project files."""
+    return _SYSTEM_INCLUDE.findall(text)

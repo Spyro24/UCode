@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from math import hypot
+
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import (
     QColor,
@@ -12,6 +14,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPaintEvent,
     QPen,
+    QPolygonF,
     QWheelEvent,
 )
 from PySide6.QtWidgets import QWidget
@@ -22,9 +25,14 @@ from ucode.core.viewport import MIN_ZOOM, Viewport
 from ucode.ui.node_editor import NodeEditor
 from ucode.ui.theme import (
     BG_SURFACE,
+    GRAPH_ARROW,
     GRAPH_EDGE,
     GRAPH_FOLDER,
     GRAPH_FOLDER_BORDER,
+    GRAPH_IMPORT,
+    GRAPH_IMPORT_BORDER,
+    GRAPH_IMPORT_EDGE,
+    GRAPH_IMPORT_TEXT,
     GRAPH_NODE,
     GRAPH_NODE_BORDER,
     TEXT_MUTED,
@@ -35,6 +43,7 @@ ZOOM_PER_NOTCH = 1.2
 NODE_HEADER_TILES = 1
 MIN_FRAME_ZOOM = 1.0  # nodes hold code, so they open at readable size
 EDITOR_MIN_ZOOM = 0.5  # below this the node bodies are not instantiated
+LABEL_MIN_ZOOM = 0.25  # names stay readable further out than the code does
 FONT_PIXELS = 11
 
 
@@ -92,6 +101,9 @@ class Canvas(QWidget):
         header = TILE * zoom * NODE_HEADER_TILES
 
         for node in self.graph.nodes:
+            if node.kind != "file":
+                continue  # import chips have no editor
+
             rect = self._rect(node.tile, node.size)
             editor = self._editors.get(node.path)
 
@@ -187,7 +199,7 @@ class Canvas(QWidget):
                 QPointF(rect.right() - 1, rect.top() + header_height),
             )
 
-            if zoom >= EDITOR_MIN_ZOOM:
+            if zoom >= LABEL_MIN_ZOOM:
                 font = self._font(10)
                 font.setBold(True)
                 painter.setFont(font)
@@ -204,33 +216,50 @@ class Canvas(QWidget):
                 )
 
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QColor(GRAPH_EDGE), max(1.0, 1.4 * zoom)))
         for edge in self.graph.edges:
             source = self._nodes.get(edge.source)
             target = self._nodes.get(edge.target)
             if source is None or target is None:
                 continue
 
+            # Dependencies on something outside the project are drawn as dashed flows.
+            external = target.kind == "import"
+            pen = QPen(
+                QColor(GRAPH_IMPORT_EDGE if external else GRAPH_EDGE),
+                max(1.0, 1.4 * zoom),
+            )
+            if external:
+                pen.setStyle(Qt.PenStyle.DashLine)
+                pen.setDashPattern([4.0, 3.0])
+            painter.setPen(pen)
+
             start = self._rect(source.tile, source.size)
             end = self._rect(target.tile, target.size)
+            # Stop short of the target so the arrowhead sits in the gap.
             x1, y1 = start.right(), start.center().y()
-            x2, y2 = end.left(), end.center().y()
+            x2, y2 = end.left() - 2.0, end.center().y()
             offset = TILE * zoom * 0.8
 
-            path = QPainterPath(QPointF(x1, y1))
+            points = [QPointF(x1, y1)]
             if x2 >= x1:
                 middle = (x1 + x2) / 2
-                path.lineTo(middle, y1)
-                path.lineTo(middle, y2)
+                points += [QPointF(middle, y1), QPointF(middle, y2)]
             else:
                 # Backwards link: loop beneath both nodes instead of crossing them.
                 detour = max(start.bottom(), end.bottom()) + offset
-                path.lineTo(x1 + offset, y1)
-                path.lineTo(x1 + offset, detour)
-                path.lineTo(x2 - offset, detour)
-                path.lineTo(x2 - offset, y2)
-            path.lineTo(QPointF(x2, y2))
+                points += [
+                    QPointF(x1 + offset, y1),
+                    QPointF(x1 + offset, detour),
+                    QPointF(x2 - offset, detour),
+                    QPointF(x2 - offset, y2),
+                ]
+            points.append(QPointF(x2, y2))
+
+            path = QPainterPath(points[0])
+            for point in points[1:]:
+                path.lineTo(point)
             painter.drawPath(path)
+            self._paint_arrow(painter, points[-2], points[-1], zoom, pen.color())
 
         header = TILE * zoom * NODE_HEADER_TILES
         for node in self.graph.nodes:
@@ -238,11 +267,35 @@ class Canvas(QWidget):
             if not rect.intersects(self.rect()):
                 continue
 
+            if node.kind == "import":
+                # An external dependency: a chip, not an editor.
+                painter.setPen(
+                    QPen(QColor(GRAPH_IMPORT_BORDER), 1, Qt.PenStyle.DashLine)
+                )
+                painter.setBrush(QColor(GRAPH_IMPORT))
+                radius = min(rect.height() / 2, 12.0)
+                painter.drawRoundedRect(rect, radius, radius)
+
+                if zoom >= LABEL_MIN_ZOOM:
+                    font = self._font(9)
+                    painter.setFont(font)
+                    painter.setPen(QColor(GRAPH_IMPORT_TEXT))
+                    metrics = QFontMetricsF(font)
+                    label = metrics.elidedText(
+                        node.label,
+                        Qt.TextElideMode.ElideRight,
+                        max(10.0, rect.width() - 16),
+                    )
+                    painter.drawText(
+                        rect, Qt.AlignmentFlag.AlignCenter, label
+                    )
+                continue
+
             painter.setPen(QPen(QColor(GRAPH_NODE_BORDER), 1))
             painter.setBrush(QColor(GRAPH_NODE))
             painter.drawRoundedRect(rect, 6, 6)
 
-            if zoom >= EDITOR_MIN_ZOOM:
+            if zoom >= LABEL_MIN_ZOOM:
                 font = self._font(9)
                 painter.setFont(font)
                 painter.setPen(QColor(TEXT_MUTED))
@@ -260,6 +313,33 @@ class Canvas(QWidget):
                     Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                     label,
                 )
+
+    def _paint_arrow(
+        self, painter: QPainter, previous: QPointF, tip: QPointF, zoom: float, colour
+    ) -> None:
+        """A flow arrow at the end of an edge, pointing the way the link goes."""
+        dx, dy = tip.x() - previous.x(), tip.y() - previous.y()
+        length = hypot(dx, dy)
+        if length < 1e-6:
+            return
+
+        ux, uy = dx / length, dy / length
+        size = max(5.0, 9.0 * zoom)
+        base_x, base_y = tip.x() - ux * size, tip.y() - uy * size
+        half = 0.5 * size
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(colour)
+        painter.drawPolygon(
+            QPolygonF(
+                [
+                    tip,
+                    QPointF(base_x - uy * half, base_y + ux * half),
+                    QPointF(base_x + uy * half, base_y - ux * half),
+                ]
+            )
+        )
+        painter.setBrush(Qt.BrushStyle.NoBrush)
 
     # -- events --------------------------------------------------------
     def showEvent(self, event) -> None:

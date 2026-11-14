@@ -1,8 +1,10 @@
 """The file graph: one node per file, grouped into the folder that holds it.
 
 Every node is sized to the file it holds — as many lines as the file has — so nothing is
-hidden behind a scrollbar. Positions are computed in tile units, which is why the canvas
-needs no grid.
+hidden behind a scrollbar. Imports that do not resolve to a file in the project become
+their own chip nodes, collected in a last "imports" group.
+
+Positions are computed in tile units, which is why the canvas needs no grid.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ucode.core.tile import TILE
-from ucode.languages.imports import c_includes, python_imports
+from ucode.languages.imports import c_includes, c_system_includes, python_imports
 
 # Approximate monospace metrics at the editor's base size, used to measure nodes without
 # creating a widget for every file first.
@@ -29,6 +31,12 @@ GAP = 1  # tiles between nodes in the same folder
 BOX_GAP = 3  # tiles between folder boxes
 BOXES_PER_ROW = 4
 
+CHIP_TILES = 1  # height of an import node
+CHIP_GAP = 0.5  # tiles between import nodes, tighter than files
+
+EXTERN_FOLDER = "~extern"
+EXTERN_LABEL = "imports"
+
 SUFFIXES = {".py", ".c", ".h"}
 SKIP_FOLDERS = {".git", ".venv", "__pycache__", "build", "dist", "node_modules", ".ucode"}
 
@@ -38,18 +46,19 @@ class Node:
     path: str  # relative to the project root, posix style
     label: str
     folder: str
-    tile: tuple[int, int]
-    size: tuple[int, int]
+    tile: tuple[float, float]
+    size: tuple[float, float]
     rows: int = 0
     columns: int = 0
+    kind: str = "file"  # "file" for editable files, "import" for external dependencies
 
 
 @dataclass(slots=True)
 class FolderBox:
     folder: str
     label: str  # the project name for the root folder, the folder name otherwise
-    tile: tuple[int, int]
-    size: tuple[int, int]
+    tile: tuple[float, float]
+    size: tuple[float, float]
 
 
 @dataclass(slots=True)
@@ -109,8 +118,16 @@ def node_size(rows: int, columns: int) -> tuple[int, int]:
     )
 
 
+def import_size(label: str) -> tuple[int, int]:
+    """A chip just wide enough for the dependency's name."""
+    width_px = len(label) * CHAR_PX + 28
+    return (max(2, math.ceil(width_px / TILE)), CHIP_TILES)
+
+
 def _layout(
-    files_by_folder: dict[str, list[tuple[str, int, int]]], root_label: str
+    files_by_folder: dict[str, list[tuple[str, int, int]]],
+    root_label: str,
+    extern_names: list[str],
 ) -> tuple[list[Node], list[FolderBox]]:
     """Stack each folder's nodes, then place the boxes left to right."""
     nodes: list[Node] = []
@@ -172,22 +189,103 @@ def _layout(
         row_height = max(row_height, box_height)
         in_row += 1
 
+    if extern_names:
+        if in_row == BOXES_PER_ROW:
+            cursor_x = 0
+            row_y += row_height + BOX_GAP
+            in_row = 0
+
+        widths = [import_size(name)[0] for name in extern_names]
+        column_width = max(widths)
+        box_width = PADDING * 2 + column_width
+        box_height = (
+            HEADER
+            + PADDING * 2
+            + len(extern_names) * CHIP_TILES
+            + CHIP_GAP * (len(extern_names) - 1)
+        )
+
+        boxes.append(
+            FolderBox(
+                folder=EXTERN_FOLDER,
+                label=EXTERN_LABEL,
+                tile=(cursor_x, row_y),
+                size=(box_width, math.ceil(box_height)),
+            )
+        )
+
+        y = row_y + HEADER + PADDING
+        for name in extern_names:
+            nodes.append(
+                Node(
+                    path=f"{EXTERN_FOLDER}/{name}",
+                    label=name,
+                    folder=EXTERN_FOLDER,
+                    tile=(cursor_x + PADDING, y),
+                    size=(column_width, CHIP_TILES),
+                    rows=1,
+                    columns=len(name),
+                    kind="import",
+                )
+            )
+            y += CHIP_TILES + CHIP_GAP
+
     return nodes, boxes
 
 
-def _links(path: Path, text: str) -> list[str]:
-    return c_includes(text) if path.suffix in {".c", ".h"} else python_imports(text)
+def _references(path: Path, text: str) -> tuple[list[str], list[str]]:
+    """(names that may be a project file, names that are always external)."""
+    if path.suffix in {".c", ".h"}:
+        return c_includes(text), c_system_includes(text)
+    return python_imports(text), []
 
 
-def _resolve(name: str, folder: str, by_stem: dict[str, list[Node]]) -> Node | None:
-    candidates = by_stem.get(Path(name).stem)
-    if not candidates:
+class _Lookup:
+    """Maps an imported name to a project file path, when one exists."""
+
+    def __init__(self, paths: list[str]) -> None:
+        self.known = set(paths)
+        self.by_stem: dict[str, list[str]] = {}
+        self.by_name: dict[str, list[str]] = {}
+
+        for path in paths:
+            self.by_stem.setdefault(Path(path).stem, []).append(path)
+            self.by_name.setdefault(Path(path).name, []).append(path)
+
+    @staticmethod
+    def folder_of(path: str) -> str:
+        parent = Path(path).parent.as_posix()
+        return "" if parent == "." else parent
+
+    def resolve(self, name: str, folder: str) -> str | None:
+        reference = Path(name)
+
+        if reference.suffix:
+            # A full file name (an include): match the path, not just the stem, so
+            # ``native.h`` does not collapse onto ``native.c``.
+            candidates = self.by_name.get(reference.name, [])
+            wanted = name.lstrip("./")
+            for candidate in candidates:
+                if candidate == wanted or candidate.endswith("/" + wanted):
+                    return candidate
+            for candidate in candidates:
+                if self.folder_of(candidate) == folder:
+                    return candidate
+            return candidates[0] if candidates else None
+
+        candidates = self.by_stem.get(name)
+        if candidates:
+            for candidate in candidates:
+                if self.folder_of(candidate) == folder:
+                    return candidate
+            return candidates[0]
+
+        # A package import: the module is a folder, so its __init__ is the target.
+        for candidate in (f"{name}/__init__.py", f"{folder}/{name}/__init__.py"):
+            if candidate in self.known:
+                return candidate
+
         return None
-
-    for candidate in candidates:
-        if candidate.folder == folder:
-            return candidate
-    return candidates[0]
 
 
 def build_file_graph(root: Path) -> FileGraph:
@@ -207,11 +305,26 @@ def build_file_graph(root: Path) -> FileGraph:
         folder = "" if folder == "." else folder
         files_by_folder.setdefault(folder, []).append((path.name, rows, columns))
 
-    nodes, boxes = _layout(files_by_folder, root.name or root.as_posix())
+    references = {path: _references(path, texts[path]) for path in files}
 
-    by_stem: dict[str, list[Node]] = {}
-    for node in nodes:
-        by_stem.setdefault(Path(node.path).stem, []).append(node)
+    lookup = _Lookup(
+        [
+            f"{folder}/{name}" if folder else name
+            for folder, entries in files_by_folder.items()
+            for name, _, _ in entries
+        ]
+    )
+
+    # Anything that cannot become an edge between two files becomes an import chip.
+    extern: set[str] = set()
+    for candidate_names, system_names in references.values():
+        extern.update(system_names)
+        extern.update(
+            name for name in candidate_names if lookup.resolve(name, "") is None
+        )
+
+    extern_names = sorted(extern)
+    nodes, boxes = _layout(files_by_folder, root.name or root.as_posix(), extern_names)
 
     edges: list[Edge] = []
     seen: set[tuple[str, str]] = set()
@@ -222,14 +335,17 @@ def build_file_graph(root: Path) -> FileGraph:
         folder = "" if folder == "." else folder
         source = f"{folder}/{path.name}" if folder else path.name
 
-        for name in _links(path, texts[path]):
-            target = _resolve(name, folder, by_stem)
-            if target is None or target.path == source:
+        candidate_names, system_names = references[path]
+
+        for name in candidate_names + system_names:
+            target_path = lookup.resolve(name, folder) or f"{EXTERN_FOLDER}/{name}"
+
+            if target_path == source:
                 continue
-            key = (source, target.path)
+            key = (source, target_path)
             if key in seen:
                 continue
             seen.add(key)
-            edges.append(Edge(source=source, target=target.path))
+            edges.append(Edge(source=source, target=target_path))
 
     return FileGraph(root=root, nodes=nodes, folders=boxes, edges=edges)

@@ -30,6 +30,11 @@ GRAPH_FOLDER_BORDER = "#2c3340"
 GRAPH_NODE = "#252b35"
 GRAPH_NODE_BORDER = "#3a4352"
 GRAPH_EDGE = "#4c5768"
+GRAPH_ARROW = "#6f7d92"
+GRAPH_IMPORT = "#1e2a33"
+GRAPH_IMPORT_BORDER = "#3a5a68"
+GRAPH_IMPORT_TEXT = "#7fb6cc"
+GRAPH_IMPORT_EDGE = "#3f6272"
 BG_NODE_EDITOR = "#20252e"
 
 # -- syntax -----------------------------------------------------------
