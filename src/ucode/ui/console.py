@@ -37,6 +37,9 @@ class Console(QFrame):
 
         self.setObjectName("console")
         self.setMinimumHeight(TILE)
+        self.setStyleSheet(
+            "#console { background-color: #eef1f5; border-top: 1px solid #c7ced9; }"
+        )
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)

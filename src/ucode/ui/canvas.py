@@ -9,8 +9,8 @@ from PySide6.QtWidgets import QWidget
 from ucode.core.viewport import Viewport
 
 BACKGROUND = QColor("#fcfcfd")
-MINOR_LINE = QColor("#e8eaee")
-MAJOR_LINE = QColor("#d2d7df")
+MINOR_LINE = QColor("#d3d8e1")
+MAJOR_LINE = QColor("#a7afbd")
 MAJOR_EVERY = 8  # every eighth tile line is drawn stronger, as a coarse ruler
 MINOR_VISIBLE_ABOVE = 6.0  # px per tile; below this the minor grid is too dense
 ZOOM_PER_NOTCH = 1.2
