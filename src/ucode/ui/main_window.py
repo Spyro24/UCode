@@ -5,7 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QShowEvent
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QCloseEvent,
+    QKeySequence,
+    QShowEvent,
+)
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -63,6 +69,11 @@ class MainWindow(QMainWindow):
         self.edit_menu: QMenu = menu_bar.addMenu("&Edit")
         self.mode_menu: QMenu = menu_bar.addMenu("&Mode")
         self.run_menu: QMenu = menu_bar.addMenu("&Run")
+
+        self.open_project_action = QAction("Open Project\u2026", self)
+        self.open_project_action.setShortcut(QKeySequence.StandardKey.Open)
+        self.open_project_action.triggered.connect(self.open_folder)
+        self.file_menu.addAction(self.open_project_action)
 
         self.mode_group = QActionGroup(self)
         self.mode_group.setExclusive(True)
@@ -145,7 +156,7 @@ class MainWindow(QMainWindow):
     def open_folder(self) -> None:
         """Ask for a folder and switch the workspace over to it."""
         start = str(self.folder) if self.folder else ""
-        path = QFileDialog.getExistingDirectory(self, "Open Folder", start)
+        path = QFileDialog.getExistingDirectory(self, "Open Project", start)
         if not path:
             return
 
