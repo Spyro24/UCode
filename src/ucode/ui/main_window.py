@@ -143,6 +143,7 @@ class MainWindow(QMainWindow):
         self.panel_toggle.button.clicked.connect(self.toggle_side_panel)
         self.work_area.empty_state.folder_requested.connect(self.open_folder)
         self.side_bar.files_toggled.connect(self.toggle_file_tree)
+        self.work_area.canvas.node_moved.connect(self._remember_positions)
 
     def showEvent(self, event: QShowEvent) -> None:
         """Hand the whole width to the work area once the window has a real size."""
@@ -171,6 +172,7 @@ class MainWindow(QMainWindow):
         self.work_area.show_canvas()
 
         self.graph = build_file_graph(path)
+        self.graph.apply_positions(self.config.positions.get(str(path), {}))
         self._graph_framed = False
         self._sync_graph()
 
@@ -199,6 +201,16 @@ class MainWindow(QMainWindow):
         if canvas.graph is not None and not self._graph_framed:
             self._graph_framed = True
             canvas.frame_graph()
+
+    def _remember_positions(self) -> None:
+        """Keep where the nodes were dropped, in the config, for this project."""
+        if self.folder is None or self.graph is None:
+            return
+
+        self.config.positions[str(self.folder)] = {
+            node.path: node.tile for node in self.graph.nodes
+        }
+        self._save_config()
 
     def _save_config(self) -> None:
         try:

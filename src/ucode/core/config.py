@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ucode.core.modes import ViewMode
@@ -38,6 +38,34 @@ def _parse_project(value: object) -> str | None:
     return None
 
 
+def _parse_positions(value: object) -> dict[str, dict[str, tuple[float, float]]]:
+    """Node positions per project: ``{project: {node path: (x, y) in tiles}}``."""
+    if not isinstance(value, dict):
+        return {}
+
+    positions: dict[str, dict[str, tuple[float, float]]] = {}
+
+    for project, nodes in value.items():
+        if not isinstance(project, str) or not isinstance(nodes, dict):
+            continue
+
+        tiles: dict[str, tuple[float, float]] = {}
+        for path, tile in nodes.items():
+            if not isinstance(path, str) or not isinstance(tile, (list, tuple)):
+                continue
+            if len(tile) != 2:
+                continue
+
+            x, y = tile
+            if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                tiles[path] = (float(x), float(y))
+
+        if tiles:
+            positions[project] = tiles
+
+    return positions
+
+
 def _parse_mode(value: object) -> ViewMode:
     if isinstance(value, str):
         try:
@@ -53,6 +81,8 @@ class Config:
 
     mode: ViewMode = ViewMode.TEXT
     project: str | None = None  # last opened folder
+    # Where the user left each node, per project, so the canvas reopens as they left it.
+    positions: dict[str, dict[str, tuple[float, float]]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -69,6 +99,7 @@ class Config:
         return cls(
             mode=_parse_mode(raw.get("mode")),
             project=_parse_project(raw.get("project")),
+            positions=_parse_positions(raw.get("positions")),
         )
 
     def save(self, path: Path | None = None) -> None:
@@ -79,6 +110,13 @@ class Config:
         data: dict[str, object] = {"mode": self.mode.value}
         if self.project:
             data["project"] = self.project
+        if self.positions:
+            data["positions"] = {
+                project: {
+                    path: [round(x, 3), round(y, 3)] for path, (x, y) in tiles.items()
+                }
+                for project, tiles in self.positions.items()
+            }
         payload = json.dumps(data, indent=2) + "\n"
 
         handle = tempfile.NamedTemporaryFile(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from math import hypot
 
-from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt
+from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QClipboard,
     QColor,
@@ -56,9 +56,11 @@ LINE_GROWTH = 12.8 / 11  # measured: line spacing per pixel of font size
 class Canvas(QWidget):
     """The infinite workspace.
 
-    Nodes are laid out automatically, so no grid is drawn. Each node carries its file in
-    an embedded editor: editing there edits the file on disk.
+    Nodes are laid out automatically, so no grid is drawn, and can be dragged anywhere.
+    Each node carries its file in an embedded editor: editing there edits the file on disk.
     """
+
+    node_moved = Signal()  # a node was dropped somewhere new
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -75,6 +77,11 @@ class Canvas(QWidget):
         self._drag_origin: QPointF | None = None
         self._frame_pending = False
 
+        # Dragging a node: which one, from where, and where it started.
+        self._drag_node = None
+        self._drag_from: QPointF | None = None
+        self._drag_tile: tuple[float, float] | None = None
+
         # A middle press that started on a node body: paste if it stays put, pan if not.
         self._pan_press: QPointF | None = None
         self._pan_editor: NodeEditor | None = None
@@ -87,6 +94,9 @@ class Canvas(QWidget):
         self._clear_editors()
         self.graph = graph
         self._nodes = graph.by_path() if graph is not None else {}
+        self._drag_node = None
+        self._drag_from = None
+        self._drag_tile = None
         self._sync_editors()
         self.update()
 
@@ -185,6 +195,48 @@ class Canvas(QWidget):
             size[0] * TILE * self.viewport.zoom,
             size[1] * TILE * self.viewport.zoom,
         )
+
+    def _node_at(self, position: QPointF):
+        """The topmost node under a screen position, if any."""
+        if self.graph is None:
+            return None
+
+        for node in reversed(self.graph.nodes):
+            if self._rect(node.tile, node.size).contains(position):
+                return node
+
+        return None
+
+    def _bring_to_front(self, node) -> None:
+        """Paint the grabbed node last, so dragging it never buries it."""
+        if self.graph is None or not self.graph.nodes:
+            return
+        if self.graph.nodes[-1] is node:
+            return
+
+        self.graph.nodes.remove(node)
+        self.graph.nodes.append(node)
+
+        editor = self._editors.get(node.path)
+        if editor is not None:
+            editor.raise_()
+
+    def _move_node(self, event: QMouseEvent) -> None:
+        """Drag the grabbed node, following the cursor in screen space."""
+        if self._drag_node is None or self._drag_from is None or self._drag_tile is None:
+            return
+
+        delta = event.position() - self._drag_from
+        scale = TILE * self.viewport.zoom
+        if scale <= 0:
+            return
+
+        self._drag_node.tile = (
+            self._drag_tile[0] + delta.x() / scale,
+            self._drag_tile[1] + delta.y() / scale,
+        )
+        self._sync_editors()
+        self.update()
 
     def _line_height(self, zoom: float) -> float:
         """The rendered height of a text line at this zoom, to hit a line exactly."""
@@ -460,6 +512,17 @@ class Canvas(QWidget):
         self._sync_editors()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            node = self._node_at(event.position())
+            if node is not None:
+                self._drag_node = node
+                self._drag_from = event.position()
+                self._bring_to_front(node)
+                self._drag_tile = node.tile
+                self._drag_origin = None
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                return
+
         if event.button() in (
             Qt.MouseButton.LeftButton,
             Qt.MouseButton.MiddleButton,
@@ -474,7 +537,18 @@ class Canvas(QWidget):
         if self._middle_drag(event):
             return
 
+        if self._drag_node is not None:
+            self._move_node(event)
+            return
+
         if self._drag_origin is None:
+            # Show that a node can be picked up.
+            over_node = self._node_at(event.position()) is not None
+            self.setCursor(
+                Qt.CursorShape.SizeAllCursor
+                if over_node
+                else Qt.CursorShape.OpenHandCursor
+            )
             super().mouseMoveEvent(event)
             return
 
@@ -489,6 +563,17 @@ class Canvas(QWidget):
             if not self._pan_moved:
                 self._paste_selection()
             self._end_middle()
+            return
+
+        if self._drag_node is not None:
+            moved = self._drag_from is not None and event.position() != self._drag_from
+            self._drag_node = None
+            self._drag_from = None
+            self._drag_tile = None
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+            if moved:
+                self.node_moved.emit()
             return
 
         if self._drag_origin is not None:

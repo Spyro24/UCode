@@ -90,6 +90,13 @@ class FileGraph:
     def by_path(self) -> dict[str, Node]:
         return {node.path: node for node in self.nodes}
 
+    def apply_positions(self, positions: dict[str, tuple[float, float]]) -> None:
+        """Put nodes back where the user dragged them last time."""
+        for node in self.nodes:
+            tile = positions.get(node.path)
+            if tile is not None:
+                node.tile = tile
+
 
 def _scan(root: Path) -> list[Path]:
     found: list[Path] = []
