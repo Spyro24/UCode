@@ -11,7 +11,7 @@ from pathlib import Path
 
 from ucode.languages.imports import c_includes, python_imports
 
-NODE_TILES = (6, 2)
+NODE_TILES = (9, 6)  # wide enough to hold a readable code view
 ELBOW_TILES = (4, 4)  # unused by the layout, kept for port work later
 
 PADDING = 1  # tiles between a folder box edge and the nodes inside it

@@ -1,8 +1,8 @@
-"""The infinite workspace: pans and zooms, and draws the file graph."""
+"""The infinite workspace: pans and zooms, and holds the file graph."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import QWidget
 from ucode.core.graph import FileGraph
 from ucode.core.tile import TILE
 from ucode.core.viewport import MIN_ZOOM, Viewport
+from ucode.ui.node_editor import NodeEditor
 from ucode.ui.theme import (
     BG_SURFACE,
     GRAPH_EDGE,
@@ -26,20 +27,22 @@ from ucode.ui.theme import (
     GRAPH_FOLDER_BORDER,
     GRAPH_NODE,
     GRAPH_NODE_BORDER,
-    TEXT,
     TEXT_MUTED,
 )
 
 BACKGROUND = QColor(BG_SURFACE)
 ZOOM_PER_NOTCH = 1.2
-LABEL_VISIBLE_ABOVE = 0.35  # below this zoom the labels are skipped
+NODE_HEADER_TILES = 1
+MIN_FRAME_ZOOM = 1.0  # nodes hold code, so they open at readable size
+EDITOR_MIN_ZOOM = 0.45  # below this the node bodies are not instantiated
+FONT_PIXELS = 11
 
 
 class Canvas(QWidget):
     """The infinite workspace.
 
-    No grid is drawn: the graph is laid out automatically, so the surface stays plain.
-    Drag with the left or middle mouse button to pan, wheel to zoom around the pointer.
+    Nodes are laid out automatically, so no grid is drawn. Each node carries its file in
+    an embedded editor: editing there edits the file on disk.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -53,18 +56,68 @@ class Canvas(QWidget):
         self.viewport = Viewport()
         self.graph: FileGraph | None = None
         self._nodes: dict = {}
+        self._editors: dict[str, NodeEditor] = {}
         self._drag_origin: QPointF | None = None
         self._frame_pending = False
 
     # -- content -------------------------------------------------------
     def set_graph(self, graph: FileGraph | None) -> None:
         """Show ``graph``, or an empty surface when it is None."""
+        self._clear_editors()
         self.graph = graph
         self._nodes = graph.by_path() if graph is not None else {}
+        self._sync_editors()
         self.update()
 
+    def save_editors(self) -> None:
+        """Write every open node back to disk before the window goes away."""
+        for editor in self._editors.values():
+            editor.save()
+
+    def _clear_editors(self) -> None:
+        for editor in self._editors.values():
+            editor.save()
+            editor.deleteLater()
+        self._editors.clear()
+
+    def _sync_editors(self) -> None:
+        """Create, position and hide node editors to match the current view."""
+        if self.graph is None:
+            for editor in self._editors.values():
+                editor.hide()
+            return
+
+        zoom = self.viewport.zoom
+        show = zoom >= EDITOR_MIN_ZOOM
+        header = TILE * zoom * NODE_HEADER_TILES
+
+        for node in self.graph.nodes:
+            rect = self._rect(node.tile, node.size)
+            editor = self._editors.get(node.path)
+
+            if not show or not rect.intersects(self.rect()):
+                if editor is not None:
+                    editor.hide()
+                continue
+
+            if editor is None:
+                editor = NodeEditor(self.graph.root / node.path, self)
+                self._editors[node.path] = editor
+
+            editor.set_zoom_font(int(max(7, round(FONT_PIXELS * zoom))))
+            editor.setGeometry(
+                QRect(
+                    int(rect.left()) + 2,
+                    int(rect.top() + header) + 1,
+                    max(12, int(rect.width()) - 4),
+                    max(12, int(rect.height() - header) - 2),
+                )
+            )
+            editor.show()
+
+    # -- camera --------------------------------------------------------
     def frame_graph(self, margin: int = TILE) -> None:
-        """Zoom and pan so the whole graph is visible, never magnified past 1:1."""
+        """Zoom and pan so the graph is framed, never magnified past 1:1."""
         if self.graph is None or not self.graph.folders:
             return
 
@@ -76,26 +129,17 @@ class Canvas(QWidget):
         width = max(box.tile[0] + box.size[0] for box in self.graph.folders) * TILE
         height = max(box.tile[1] + box.size[1] for box in self.graph.folders) * TILE
 
-        zoom = min(
-            1.0,
+        fit = min(
             max(1, self.width() - 2 * margin) / max(1, width),
             max(1, self.height() - 2 * margin) / max(1, height),
         )
+
         self._frame_pending = False
-        self.viewport.zoom = max(MIN_ZOOM, zoom)
+        self.viewport.zoom = max(MIN_FRAME_ZOOM, min(1.0, fit))
         self.viewport.left = -margin / self.viewport.zoom
         self.viewport.top = -margin / self.viewport.zoom
+        self._sync_editors()
         self.update()
-
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        if self._frame_pending:
-            self.frame_graph()
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        if self._frame_pending:
-            self.frame_graph()
 
     # -- painting -----------------------------------------------------
     def paintEvent(self, event: QPaintEvent) -> None:
@@ -107,9 +151,7 @@ class Canvas(QWidget):
 
         painter.end()
 
-    def _rect(self, tile: tuple[int, int], size: tuple[int, int]) -> "QRectF":
-        from PySide6.QtCore import QRectF
-
+    def _rect(self, tile: tuple[int, int], size: tuple[int, int]) -> QRectF:
         x, y = self.viewport.world_to_screen(tile[0] * TILE, tile[1] * TILE)
         return QRectF(
             x,
@@ -136,7 +178,7 @@ class Canvas(QWidget):
             painter.setBrush(QColor(GRAPH_FOLDER))
             painter.drawRoundedRect(rect, 8, 8)
 
-            if zoom >= LABEL_VISIBLE_ABOVE:
+            if zoom >= EDITOR_MIN_ZOOM:
                 painter.setPen(QColor(TEXT_MUTED))
                 painter.setFont(self._font(11))
                 painter.drawText(
@@ -174,6 +216,7 @@ class Canvas(QWidget):
             path.lineTo(QPointF(x2, y2))
             painter.drawPath(path)
 
+        header = TILE * zoom * NODE_HEADER_TILES
         for node in self.graph.nodes:
             rect = self._rect(node.tile, node.size)
             if not rect.intersects(self.rect()):
@@ -183,23 +226,38 @@ class Canvas(QWidget):
             painter.setBrush(QColor(GRAPH_NODE))
             painter.drawRoundedRect(rect, 6, 6)
 
-            if zoom >= LABEL_VISIBLE_ABOVE:
-                font = self._font(11)
+            if zoom >= EDITOR_MIN_ZOOM:
+                font = self._font(9)
                 painter.setFont(font)
-                painter.setPen(QColor(TEXT))
+                painter.setPen(QColor(TEXT_MUTED))
                 metrics = QFontMetricsF(font)
                 label = metrics.elidedText(
-                    node.label,
-                    Qt.TextElideMode.ElideMiddle,
-                    max(10.0, rect.width() - 20),
+                    node.label, Qt.TextElideMode.ElideMiddle, max(10.0, rect.width() - 20)
                 )
                 painter.drawText(
-                    rect.adjusted(10, 0, -10, 0),
+                    QRectF(
+                        rect.left() + 10,
+                        rect.top() + 2,
+                        rect.width() - 20,
+                        max(1.0, header - 3),
+                    ),
                     Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                     label,
                 )
 
-    # -- interaction ---------------------------------------------------
+    # -- events --------------------------------------------------------
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._frame_pending:
+            self.frame_graph()
+        self._sync_editors()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._frame_pending:
+            self.frame_graph()
+        self._sync_editors()
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() in (
             Qt.MouseButton.LeftButton,
@@ -219,6 +277,7 @@ class Canvas(QWidget):
         delta = event.position() - self._drag_origin
         self._drag_origin = event.position()
         self.viewport.pan_by(delta.x(), delta.y())
+        self._sync_editors()
         self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
@@ -236,5 +295,6 @@ class Canvas(QWidget):
 
         position = event.position()
         self.viewport.zoom_at(position.x(), position.y(), ZOOM_PER_NOTCH**notches)
+        self._sync_editors()
         self.update()
         event.accept()

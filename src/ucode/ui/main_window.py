@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QActionGroup, QShowEvent
+from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QShowEvent
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -206,6 +206,11 @@ class MainWindow(QMainWindow):
         visible = not self.file_tree.isVisible()
         self.file_tree.setVisible(visible)
         self.side_bar.folder_button.setChecked(visible)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Flush any node edits still sitting in an editor."""
+        self.work_area.canvas.save_editors()
+        super().closeEvent(event)
 
     # -- side panel ----------------------------------------------------
     def open_side_panel(self) -> None:
