@@ -15,7 +15,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ucode.ui.modes import ViewMode
+from ucode.core.config import Config
+from ucode.core.modes import ViewMode
 from ucode.ui.panel_toggle import PanelToggle
 from ucode.ui.side_panel import SidePanel
 from ucode.ui.sidebar import SideBar
@@ -39,7 +40,8 @@ class MainWindow(QMainWindow):
 
         self._split_applied = False
         self.folder: Path | None = None
-        self.mode: ViewMode = ViewMode.TEXT
+        self.config = Config.load()
+        self.mode: ViewMode = self.config.mode
 
         self._build_menu_bar()
         self._build_central_area()
@@ -71,12 +73,20 @@ class MainWindow(QMainWindow):
             self.mode_menu.addAction(action)
             self.mode_actions[mode] = action
 
-        self.set_mode(ViewMode.TEXT)
+        self.set_mode(self.config.mode, persist=False)
 
-    def set_mode(self, mode: ViewMode) -> None:
-        """Choose how the project is presented and reflect it in the menu."""
+    def set_mode(self, mode: ViewMode, *, persist: bool = True) -> None:
+        """Choose how the project is presented, reflect it in the menu, remember it."""
         self.mode = mode
         self.mode_actions[mode].setChecked(True)
+
+        if persist and self.config.mode is not mode:
+            self.config.mode = mode
+            try:
+                self.config.save()
+            except OSError:
+                # A read-only config directory must not take the editor down.
+                pass
 
     def _build_central_area(self) -> None:
         central = QWidget(self)
