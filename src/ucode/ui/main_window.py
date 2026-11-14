@@ -24,9 +24,10 @@ from ucode.ui.work_area import WorkArea
 class MainWindow(QMainWindow):
     """Application window.
 
-    Layout, left to right: the tile-wide sidebar, the work area (editor over console),
+    Layout, left to right: the tile-wide sidebar, the work area (workspace over console),
     the contextual side panel, and the tile-wide toggle strip on the far right edge that
-    opens and closes that panel. The menus and every area are empty for now.
+    closes it again. Panel and strip are absent by default — they appear together only
+    when something asks for the panel. The menus and every area are empty for now.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -41,7 +42,9 @@ class MainWindow(QMainWindow):
         self._build_menu_bar()
         self._build_central_area()
 
+        # Both the panel and its edge strip are contextual: neither exists by default.
         self.side_panel.hide()
+        self.panel_toggle.hide()
 
     def _build_menu_bar(self) -> None:
         menu_bar = self.menuBar()
@@ -91,7 +94,8 @@ class MainWindow(QMainWindow):
             self.splitter.setSizes([self.splitter.width(), 0])
 
     def open_side_panel(self) -> None:
-        """Show the side panel at its default five tiles."""
+        """Show the side panel at its default five tiles, with its edge strip."""
+        self.panel_toggle.show()
         self.side_panel.show()
         self.panel_toggle.button.setChecked(True)
 
@@ -101,9 +105,10 @@ class MainWindow(QMainWindow):
         )
 
     def close_side_panel(self) -> None:
-        """Remove the side panel again; the work area takes the width back."""
+        """Remove the side panel and its strip; the work area takes the width back."""
         self.side_panel.hide()
         self.panel_toggle.button.setChecked(False)
+        self.panel_toggle.hide()
 
     def toggle_side_panel(self) -> None:
         if self.side_panel.isVisible():
