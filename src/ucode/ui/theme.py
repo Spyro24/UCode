@@ -25,8 +25,9 @@ BG_CONTROL_PRESSED = "#313743"
 BORDER = "#272b34"
 BORDER_STRONG = "#333a46"
 # -- node graph -------------------------------------------------------
-GRAPH_FOLDER = "#1c2027"
-GRAPH_FOLDER_BORDER = "#2c3340"
+GRAPH_FOLDER = "#14171d"  # clearly darker than the #1b1e24 surface
+GRAPH_FOLDER_HEADER = "#1f242c"
+GRAPH_FOLDER_BORDER = "#3b4553"
 GRAPH_NODE = "#252b35"
 GRAPH_NODE_BORDER = "#3a4352"
 GRAPH_EDGE = "#4c5768"

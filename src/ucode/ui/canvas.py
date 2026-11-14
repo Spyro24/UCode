@@ -33,6 +33,7 @@ from ucode.ui.theme import (
     GRAPH_EDGE_LABEL,
     GRAPH_FOLDER,
     GRAPH_FOLDER_BORDER,
+    GRAPH_FOLDER_HEADER,
     GRAPH_IMPORT,
     GRAPH_IMPORT_BORDER,
     GRAPH_IMPORT_EDGE,
@@ -61,6 +62,7 @@ class Canvas(QWidget):
     """
 
     node_moved = Signal()  # a node was dropped somewhere new
+    folder_moved = Signal()  # a folder box was dropped, taking its nodes along
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -82,6 +84,12 @@ class Canvas(QWidget):
         self._drag_from: QPointF | None = None
         self._drag_tile: tuple[float, float] | None = None
 
+        # Dragging a folder box: it carries its nodes.
+        self._drag_folder = None
+        self._drag_folder_from: QPointF | None = None
+        self._drag_folder_tile: tuple[float, float] | None = None
+        self._drag_folder_members: list = []
+
         # A middle press that started on a node body: paste if it stays put, pan if not.
         self._pan_press: QPointF | None = None
         self._pan_editor: NodeEditor | None = None
@@ -97,6 +105,10 @@ class Canvas(QWidget):
         self._drag_node = None
         self._drag_from = None
         self._drag_tile = None
+        self._drag_folder = None
+        self._drag_folder_from = None
+        self._drag_folder_tile = None
+        self._drag_folder_members = []
         self._sync_editors()
         self.update()
 
@@ -207,6 +219,73 @@ class Canvas(QWidget):
 
         return None
 
+    def _folder_at(self, position: QPointF):
+        """The folder whose header band is under a screen position."""
+        if self.graph is None:
+            return None
+
+        header = TILE * self.viewport.zoom
+        for box in reversed(self.graph.folders):
+            rect = self._rect(box.tile, box.size)
+            handle = QRectF(rect.left(), rect.top(), rect.width(), header)
+            if handle.contains(position):
+                return box
+
+        return None
+
+    def _folder_is_free(self, box, tile: tuple[float, float]) -> bool:
+        """True when the box, placed at ``tile``, does not touch another folder."""
+        if self.graph is None:
+            return True
+
+        rect = QRectF(tile[0], tile[1], box.size[0], box.size[1])
+        for other in self.graph.folders:
+            if other is box:
+                continue
+            if rect.intersects(
+                QRectF(other.tile[0], other.tile[1], other.size[0], other.size[1])
+            ):
+                return False
+
+        return True
+
+    def _settle_folder(self, box, tile: tuple[float, float]) -> tuple[float, float]:
+        """Groups never overlap: slide along an edge instead of pushing through."""
+        if self._folder_is_free(box, tile):
+            return tile
+
+        horizontal = (tile[0], box.tile[1])
+        if self._folder_is_free(box, horizontal):
+            return horizontal
+
+        vertical = (box.tile[0], tile[1])
+        if self._folder_is_free(box, vertical):
+            return vertical
+
+        return box.tile
+
+    def _move_folder(self, event: QMouseEvent) -> None:
+        """Drag a group: the box and every node that belongs to it."""
+        box = self._drag_folder
+        origin = self._drag_folder_from
+        start = self._drag_folder_tile
+        scale = TILE * self.viewport.zoom
+
+        if box is None or origin is None or start is None or scale <= 0:
+            return
+
+        delta = event.position() - origin
+        proposed = (start[0] + delta.x() / scale, start[1] + delta.y() / scale)
+        settled = self._settle_folder(box, proposed)
+
+        box.tile = settled
+        shift = (settled[0] - start[0], settled[1] - start[1])
+        for node, node_start in self._drag_folder_members:
+            node.tile = (node_start[0] + shift[0], node_start[1] + shift[1])
+
+        self._sync_editors()
+        self.update()
+
     def _bring_to_front(self, node) -> None:
         """Paint the grabbed node last, so dragging it never buries it."""
         if self.graph is None or not self.graph.nodes:
@@ -269,12 +348,31 @@ class Canvas(QWidget):
             if not rect.intersects(self.rect()):
                 continue
 
-            painter.setPen(QPen(QColor(GRAPH_FOLDER_BORDER), 1))
+            # A drop shadow lifts the group off the workspace.
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 90))
+            painter.drawRoundedRect(rect.translated(0, 3), 9, 9)
+
+            painter.setPen(QPen(QColor(GRAPH_FOLDER_BORDER), 1.2))
             painter.setBrush(QColor(GRAPH_FOLDER))
             painter.drawRoundedRect(rect, 8, 8)
 
-            # A header band makes the group read as one unit.
+            # A filled header band makes the group read as one solid object.
             header_height = TILE * zoom
+            band = QRectF(
+                rect.left() + 1,
+                rect.top() + 1,
+                max(1.0, rect.width() - 2),
+                max(1.0, header_height - 1),
+            )
+            shape = QPainterPath()
+            shape.addRoundedRect(band, 7, 7)
+            clip = QPainterPath()
+            clip.addRect(band)
+            painter.fillPath(
+                shape.intersected(clip), QColor(GRAPH_FOLDER_HEADER)
+            )
+
             painter.setPen(QPen(QColor(GRAPH_FOLDER_BORDER), 1))
             painter.drawLine(
                 QPointF(rect.left() + 1, rect.top() + header_height),
@@ -513,6 +611,23 @@ class Canvas(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            box = self._folder_at(event.position())
+            if box is not None:
+                # Grabbed by its header: the whole group travels together.
+                self.graph.folders.remove(box)
+                self.graph.folders.append(box)
+                self._drag_folder = box
+                self._drag_folder_from = event.position()
+                self._drag_folder_tile = box.tile
+                self._drag_folder_members = [
+                    (node, node.tile)
+                    for node in self.graph.nodes
+                    if node.folder == box.folder
+                ]
+                self._drag_origin = None
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                return
+
             node = self._node_at(event.position())
             if node is not None:
                 self._drag_node = node
@@ -537,6 +652,10 @@ class Canvas(QWidget):
         if self._middle_drag(event):
             return
 
+        if self._drag_folder is not None:
+            self._move_folder(event)
+            return
+
         if self._drag_node is not None:
             self._move_node(event)
             return
@@ -544,9 +663,10 @@ class Canvas(QWidget):
         if self._drag_origin is None:
             # Show that a node can be picked up.
             over_node = self._node_at(event.position()) is not None
+            over_folder = self._folder_at(event.position()) is not None
             self.setCursor(
                 Qt.CursorShape.SizeAllCursor
-                if over_node
+                if over_node or over_folder
                 else Qt.CursorShape.OpenHandCursor
             )
             super().mouseMoveEvent(event)
@@ -563,6 +683,21 @@ class Canvas(QWidget):
             if not self._pan_moved:
                 self._paste_selection()
             self._end_middle()
+            return
+
+        if self._drag_folder is not None:
+            moved = (
+                self._drag_folder_from is not None
+                and event.position() != self._drag_folder_from
+            )
+            self._drag_folder = None
+            self._drag_folder_from = None
+            self._drag_folder_tile = None
+            self._drag_folder_members = []
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+            if moved:
+                self.folder_moved.emit()
             return
 
         if self._drag_node is not None:

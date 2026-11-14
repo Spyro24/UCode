@@ -97,6 +97,13 @@ class FileGraph:
             if tile is not None:
                 node.tile = tile
 
+    def apply_folder_positions(self, positions: dict[str, tuple[float, float]]) -> None:
+        """Put the folder boxes back where the user dragged them last time."""
+        for box in self.folders:
+            tile = positions.get(box.folder)
+            if tile is not None:
+                box.tile = tile
+
 
 def _scan(root: Path) -> list[Path]:
     found: list[Path] = []

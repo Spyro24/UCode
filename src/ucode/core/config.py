@@ -83,6 +83,8 @@ class Config:
     project: str | None = None  # last opened folder
     # Where the user left each node, per project, so the canvas reopens as they left it.
     positions: dict[str, dict[str, tuple[float, float]]] = field(default_factory=dict)
+    # The same for the folder boxes, which can be dragged independently.
+    folders: dict[str, dict[str, tuple[float, float]]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -100,6 +102,7 @@ class Config:
             mode=_parse_mode(raw.get("mode")),
             project=_parse_project(raw.get("project")),
             positions=_parse_positions(raw.get("positions")),
+            folders=_parse_positions(raw.get("folders")),
         )
 
     def save(self, path: Path | None = None) -> None:
@@ -110,12 +113,14 @@ class Config:
         data: dict[str, object] = {"mode": self.mode.value}
         if self.project:
             data["project"] = self.project
-        if self.positions:
-            data["positions"] = {
+        for key, mapping in (("positions", self.positions), ("folders", self.folders)):
+            if not mapping:
+                continue
+            data[key] = {
                 project: {
-                    path: [round(x, 3), round(y, 3)] for path, (x, y) in tiles.items()
+                    name: [round(x, 3), round(y, 3)] for name, (x, y) in tiles.items()
                 }
-                for project, tiles in self.positions.items()
+                for project, tiles in mapping.items()
             }
         payload = json.dumps(data, indent=2) + "\n"
 
