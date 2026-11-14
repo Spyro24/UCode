@@ -27,6 +27,8 @@ class NodeEditor(QPlainTextEdit):
 
         self.setObjectName("nodeEditor")
         self.setFrameShape(QFrame.Shape.NoFrame)
+        # No document margin: the node was measured without one.
+        self.document().setDocumentMargin(0)
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.setStyleSheet(
             f"QPlainTextEdit {{ background-color: {BG_NODE_EDITOR}; color: {TEXT};"

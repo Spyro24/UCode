@@ -34,7 +34,7 @@ BACKGROUND = QColor(BG_SURFACE)
 ZOOM_PER_NOTCH = 1.2
 NODE_HEADER_TILES = 1
 MIN_FRAME_ZOOM = 1.0  # nodes hold code, so they open at readable size
-EDITOR_MIN_ZOOM = 0.45  # below this the node bodies are not instantiated
+EDITOR_MIN_ZOOM = 0.5  # below this the node bodies are not instantiated
 FONT_PIXELS = 11
 
 
@@ -104,13 +104,14 @@ class Canvas(QWidget):
                 editor = NodeEditor(self.graph.root / node.path, self)
                 self._editors[node.path] = editor
 
-            editor.set_zoom_font(int(max(7, round(FONT_PIXELS * zoom))))
+            # Floor, so the text always stays inside the node it was measured for.
+            editor.set_zoom_font(max(5, int(FONT_PIXELS * zoom)))
             editor.setGeometry(
                 QRect(
-                    int(rect.left()) + 2,
+                    int(rect.left()) + 3,
                     int(rect.top() + header) + 1,
-                    max(12, int(rect.width()) - 4),
-                    max(12, int(rect.height() - header) - 2),
+                    max(12, int(rect.width()) - 6),
+                    max(12, int(rect.height() - header) - 4),
                 )
             )
             editor.show()
@@ -178,12 +179,27 @@ class Canvas(QWidget):
             painter.setBrush(QColor(GRAPH_FOLDER))
             painter.drawRoundedRect(rect, 8, 8)
 
+            # A header band makes the group read as one unit.
+            header_height = TILE * zoom
+            painter.setPen(QPen(QColor(GRAPH_FOLDER_BORDER), 1))
+            painter.drawLine(
+                QPointF(rect.left() + 1, rect.top() + header_height),
+                QPointF(rect.right() - 1, rect.top() + header_height),
+            )
+
             if zoom >= EDITOR_MIN_ZOOM:
+                font = self._font(10)
+                font.setBold(True)
+                painter.setFont(font)
                 painter.setPen(QColor(TEXT_MUTED))
-                painter.setFont(self._font(11))
                 painter.drawText(
-                    rect.adjusted(10, 6, -10, 0),
-                    Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+                    QRectF(
+                        rect.left() + 10,
+                        rect.top(),
+                        rect.width() - 20,
+                        header_height,
+                    ),
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                     box.label,
                 )
 
