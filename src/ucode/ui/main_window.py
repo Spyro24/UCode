@@ -17,10 +17,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QSplitter,
     QWidget,
 )
 
+from typing import Callable
+
+from ucode.core import disasm, elf
 from ucode.core.config import Config
 from ucode.core.graph import FileGraph, build_file_graph
 from ucode.core.modes import ViewMode
@@ -52,6 +56,9 @@ class MainWindow(QMainWindow):
         self.mode: ViewMode = self.config.mode
         self.graph: FileGraph | None = None
         self._graph_framed = False
+        # A single file opened on its own: what it is, and how to build its view again.
+        self.file_path: Path | None = None
+        self._view_factory: Callable[[], FileGraph | None] | None = None
 
         self._build_menu_bar()
         self._build_central_area()
@@ -79,6 +86,11 @@ class MainWindow(QMainWindow):
         self.open_project_action.setShortcut(QKeySequence.StandardKey.Open)
         self.open_project_action.triggered.connect(self.open_folder)
         self.file_menu.addAction(self.open_project_action)
+
+        self.open_file_action = QAction("Open File\u2026", self)
+        self.open_file_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        self.open_file_action.triggered.connect(self.open_file)
+        self.file_menu.addAction(self.open_file_action)
 
         self.mode_group = QActionGroup(self)
         self.mode_group.setExclusive(True)
@@ -169,9 +181,111 @@ class MainWindow(QMainWindow):
 
         self.set_folder(Path(path))
 
+    # -- single file ---------------------------------------------------
+    def open_file(self) -> None:
+        """Ask for one file and open it on its own."""
+        start = str(self.folder) if self.folder else str(Path.home())
+        path, _ = QFileDialog.getOpenFileName(self, "Open File", start)
+        if not path:
+            return
+
+        self.load_file(Path(path))
+
+    def load_file(self, path: Path) -> None:
+        """Show ``path`` alone; a binary has to be told how to present itself."""
+        path = path.resolve()
+        if not path.is_file():
+            return
+
+        view = "text"
+        if elf.is_elf(path):
+            view = self._ask_elf_view(path)
+            if view is None:
+                return
+
+        self.show_file(path, view)
+
+    def _ask_elf_view(self, path: Path) -> str | None:
+        """Which of the three viewers an ELF binary should open in."""
+        info = elf.header(path)
+        box = QMessageBox(self)
+        box.setWindowTitle("ELF binary")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"{path.name} is an ELF binary.")
+        box.setInformativeText(
+            (info.summary(path) if info is not None else "ELF binary")
+            + "\n\nHow do you want to open it?"
+        )
+        text_button = box.addButton("Text editor", QMessageBox.ButtonRole.AcceptRole)
+        hex_button = box.addButton("Hex editor", QMessageBox.ButtonRole.AcceptRole)
+        disasm_button = box.addButton(
+            "Disassembly", QMessageBox.ButtonRole.AcceptRole
+        )
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(text_button)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is text_button:
+            return "text"
+        if clicked is hex_button:
+            return "hex"
+        if clicked is disasm_button:
+            return "disasm"
+        return None
+
+    def show_file(self, path: Path, view: str) -> None:
+        """Open a lone file in the view that was chosen for it."""
+        note = ""
+        if view == "disasm":
+            graph, note = disasm.build_graph(path)
+            if graph is None:
+                QMessageBox.warning(self, "Disassembly", note)
+                return
+            factory = lambda: disasm.build_graph(path)[0]  # noqa: E731
+        elif view == "hex":
+            graph = elf.build_hex_graph(path)
+            factory = lambda: elf.build_hex_graph(path)  # noqa: E731
+        else:
+            graph = elf.build_text_graph(path)
+            factory = lambda: elf.build_text_graph(path)  # noqa: E731
+
+        if self.folder is not None:
+            # A file opens on its own, so the project's file selector steps aside.
+            self.file_tree.hide()
+            self.side_bar.folder_button.setChecked(False)
+
+        self.file_path = path
+        self._view_factory = factory
+        self.work_area.show_canvas()
+        self.set_mode(ViewMode.NODE_FILES, persist=False)
+        self._show_graph(graph)
+        title = f"UCode \u2014 {path.name}"
+        if note:
+            title += f" \u2014 {note}"
+        self.setWindowTitle(title)
+
+    def _show_graph(self, graph: FileGraph) -> None:
+        """Put a freshly built graph on the canvas, with any remembered positions."""
+        self.graph = graph
+        key = self._view_key()
+        self.graph.apply_positions(self.config.positions.get(key, {}))
+        self.graph.apply_folder_positions(self.config.folders.get(key, {}))
+        self._graph_framed = False
+        self._sync_graph()
+
+    def _view_key(self) -> str:
+        """What remembered positions for the current view are filed under."""
+        if self.file_path is not None:
+            return str(self.file_path)
+        return str(self.folder)
+
     def set_folder(self, path: Path) -> None:
         """Open ``path`` as the project: canvas, file selector root, remembered."""
         self.folder = path
+        self.file_path = None
+        self._view_factory = None
+        self.setWindowTitle("UCode")
         self.file_tree.set_root(path)
         self.file_tree.show()
         self.side_bar.folder_button.setChecked(True)
@@ -203,35 +317,45 @@ class MainWindow(QMainWindow):
             return
 
         canvas = self.work_area.canvas
-        canvas.set_graph(self.graph if self.mode is ViewMode.NODE_FILES else None)
+        show = self.mode is ViewMode.NODE_FILES or self.file_path is not None
+        canvas.set_graph(self.graph if show else None)
 
         if canvas.graph is not None and not self._graph_framed:
             self._graph_framed = True
             canvas.frame_graph()
 
     def recompute_layout(self) -> None:
-        """Throw away the hand-placed arrangement and lay the project out afresh."""
-        if self.folder is None:
-            return
-
-        project = str(self.folder)
-        self.config.positions.pop(project, None)
-        self.config.folders.pop(project, None)
+        """Throw away the hand-placed arrangement and lay the view out afresh."""
+        key = self._view_key()
+        self.config.positions.pop(key, None)
+        self.config.folders.pop(key, None)
         self._save_config()
 
-        self.graph = build_file_graph(self.folder)
+        if self.folder is not None and self.file_path is None:
+            self.graph = build_file_graph(self.folder)
+        elif self._view_factory is not None:
+            rebuilt = self._view_factory()
+            if rebuilt is None:
+                return
+            self.graph = rebuilt
+        else:
+            return
+
         self._graph_framed = False
         self._sync_graph()
 
     def _remember_positions(self) -> None:
-        """Keep where the nodes were dropped, in the config, for this project."""
-        if self.folder is None or self.graph is None:
+        """Keep where the nodes were dropped, in the config, for this view."""
+        if self.graph is None:
+            return
+        if self.folder is None and self.file_path is None:
             return
 
-        self.config.positions[str(self.folder)] = {
+        key = self._view_key()
+        self.config.positions[key] = {
             node.path: node.tile for node in self.graph.nodes
         }
-        self.config.folders[str(self.folder)] = {
+        self.config.folders[key] = {
             box.folder: box.tile for box in self.graph.folders
         }
         self._save_config()

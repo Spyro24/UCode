@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from math import hypot
+from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
@@ -141,6 +142,10 @@ class Canvas(QWidget):
     def _clear_editors(self) -> None:
         for editor in self._editors.values():
             editor.save()
+            # deleteLater only runs on a return to the event loop, so hide now: otherwise
+            # the old view's editors stay on screen over the new one.
+            editor.hide()
+            editor.setParent(None)
             editor.deleteLater()
         self._editors.clear()
 
@@ -168,7 +173,23 @@ class Canvas(QWidget):
                 continue
 
             if editor is None:
-                editor = NodeEditor(self.graph.root / node.path, self)
+                generated = self.graph.synthetic.get(node.path)
+                if generated is None:
+                    editor = NodeEditor(self.graph.root / node.path, self)
+                else:
+                    text, mode = generated
+                    editor = NodeEditor(
+                        Path(node.path),
+                        self,
+                        text=text,
+                        mode=mode,
+                        tail=self.graph.tail if mode == "hex" else b"",
+                        source=(
+                            self.graph.root / node.path
+                            if self.graph.root is not None and mode == "hex"
+                            else None
+                        ),
+                    )
                 editor.installEventFilter(self)
                 editor.content_changed.connect(
                     lambda path=node.path: self._content_changed(path)

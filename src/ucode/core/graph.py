@@ -85,6 +85,11 @@ class FileGraph:
     nodes: list[Node] = field(default_factory=list)
     folders: list[FolderBox] = field(default_factory=list)
     edges: list[Edge] = field(default_factory=list)
+    # Nodes whose text is generated rather than read from disk: path -> (text, mode),
+    # where mode is "hex" (editable bytes), "readonly" or "source".
+    synthetic: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # Bytes past the part a hex view shows: saved back unchanged, never edited.
+    tail: bytes = b""
 
     def by_path(self) -> dict[str, Node]:
         return {node.path: node for node in self.nodes}

@@ -15,6 +15,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QFrame, QPlainTextEdit, QWidget
 
+from ucode.core.elf import parse_hex_dump
 from ucode.ui.highlighters import highlighter_for
 from ucode.ui.theme import BG_NODE_EDITOR, GUTTER_BG, GUTTER_TEXT, TEXT
 
@@ -45,10 +46,26 @@ class NodeEditor(QPlainTextEdit):
 
     content_changed = Signal()  # the text grew or shrank: the node must follow
 
-    def __init__(self, path: Path, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        parent: QWidget | None = None,
+        *,
+        text: str | None = None,
+        mode: str = "source",
+        tail: bytes = b"",
+        source: Path | None = None,
+    ) -> None:
         super().__init__(parent)
 
         self.path = path
+        # Where the bytes actually live: a generated node's display path is not a file.
+        self._source = source if source is not None else path
+        # "source" edits the file as text, "hex" edits the hex dump's bytes, and
+        # "readonly" shows generated text that never goes back to disk.
+        self.mode = mode
+        # A hex view shows the start of a file; the rest is written back untouched.
+        self._tail = tail
 
         self.setObjectName("nodeEditor")
         self.setFrameShape(QFrame.Shape.NoFrame)
@@ -71,13 +88,21 @@ class NodeEditor(QPlainTextEdit):
         self.setFont(font)
         self._update_tab_width()
 
-        try:
-            self.setPlainText(path.read_text(encoding="utf-8", errors="replace"))
-        except OSError:
-            self.setPlainText("")
+        if text is None:
+            try:
+                self.setPlainText(path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                self.setPlainText("")
+        else:
+            self.setPlainText(text)
+
+        if mode == "readonly":
+            self.setReadOnly(True)
 
         # Kept as an attribute: the document does not own its highlighter.
-        self.highlighter = highlighter_for(path, self.document())
+        self.highlighter = (
+            highlighter_for(path, self.document()) if mode == "source" else None
+        )
 
         # The size the text was last fitted to, so moving a node does not re-fit it.
         self._fitted: tuple[int, int, int, int] | None = None
@@ -238,11 +263,18 @@ class NodeEditor(QPlainTextEdit):
         self.content_changed.emit()
 
     def save(self) -> None:
-        if not self.document().isModified():
+        if not self.document().isModified() or self.mode == "readonly":
             return
 
         try:
-            self.path.write_text(self.toPlainText(), encoding="utf-8")
+            if self.mode == "hex":
+                data = parse_hex_dump(self.toPlainText())
+                if data is None:
+                    # A half-typed line: keep the edit in the view, leave the file alone.
+                    return
+                self._source.write_bytes(data + self._tail)
+            else:
+                self._source.write_text(self.toPlainText(), encoding="utf-8")
         except OSError:
             return
 
