@@ -23,7 +23,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
-from ucode.core.graph import FileGraph
+from ucode.core.graph import BOX_GAP, GAP, PADDING, FileGraph, node_size
 from ucode.core.routing import crosses, route
 from ucode.core.tile import TILE
 from ucode.core.viewport import MIN_ZOOM, Viewport
@@ -162,6 +162,9 @@ class Canvas(QWidget):
             if editor is None:
                 editor = NodeEditor(self.graph.root / node.path, self)
                 editor.installEventFilter(self)
+                editor.content_changed.connect(
+                    lambda path=node.path: self._content_changed(path)
+                )
                 self._editors[node.path] = editor
 
             editor.setGeometry(
@@ -214,6 +217,119 @@ class Canvas(QWidget):
 
         painter.end()
 
+    def _content_changed(self, path: str) -> None:
+        """Grow the node to fit edited text, and its folder to fit the node."""
+        node = self._nodes.get(path)
+        editor = self._editors.get(path)
+        if node is None or editor is None:
+            return
+
+        lines = editor.toPlainText().split("\n")
+        rows = max(1, len(lines))
+        columns = max(1, max(len(line) for line in lines))
+        if (rows, columns) == (node.rows, node.columns):
+            return
+
+        node.rows = rows
+        node.columns = columns
+        node.size = node_size(rows, columns)
+
+        moved = [node, *self._make_room(node)]
+        self._grow_folder(node)
+        for item in moved:
+            self._replan_near(item, thorough=True)
+
+        self._sync_editors()
+        self.update()
+        self.node_moved.emit()
+
+    def _make_room(self, node) -> list:
+        """Push siblings out of the way of a node that just grew."""
+        if self.graph is None:
+            return []
+
+        pushed: list = []
+        rect = QRectF(node.tile[0], node.tile[1], node.size[0], node.size[1])
+
+        for _ in range(32):
+            other = next(
+                (
+                    candidate
+                    for candidate in self.graph.nodes
+                    if candidate is not node
+                    and candidate.folder == node.folder
+                    and rect.intersects(
+                        QRectF(
+                            candidate.tile[0],
+                            candidate.tile[1],
+                            candidate.size[0],
+                            candidate.size[1],
+                        )
+                    )
+                ),
+                None,
+            )
+            if other is None:
+                break
+
+            other.tile = (
+                other.tile[0],
+                node.tile[1] + node.size[1] + GAP,
+            )
+            pushed.append(other)
+
+        return pushed
+
+    def _grow_folder(self, node, limit: int = 24) -> None:
+        """Enlarge the node's group to hold it, shoving neighbours clear if needed."""
+        if self.graph is None:
+            return
+
+        box = next(
+            (b for b in self.graph.folders if b.folder == node.folder), None
+        )
+        if box is None:
+            return
+
+        # Fit the group around whatever its members now occupy; never shrink it.
+        members = [m for m in self.graph.nodes if m.folder == box.folder]
+        right = max(
+            (m.tile[0] + m.size[0] for m in members),
+            default=box.tile[0] + box.size[0] - PADDING,
+        ) + PADDING
+        bottom = max(
+            (m.tile[1] + m.size[1] for m in members),
+            default=box.tile[1] + box.size[1] - PADDING,
+        ) + PADDING
+        box.size = (
+            max(box.size[0], right - box.tile[0]),
+            max(box.size[1], bottom - box.tile[1]),
+        )
+
+        for _ in range(limit):
+            other = next(
+                (
+                    b
+                    for b in self.graph.folders
+                    if b is not box
+                    and QRectF(
+                        box.tile[0], box.tile[1], box.size[0], box.size[1]
+                    ).intersects(
+                        QRectF(b.tile[0], b.tile[1], b.size[0], b.size[1])
+                    )
+                ),
+                None,
+            )
+            if other is None:
+                return
+
+            # Groups never overlap: move this one past the other and take its nodes.
+            shift = other.tile[0] + other.size[0] + BOX_GAP - box.tile[0]
+            box.tile = (box.tile[0] + shift, box.tile[1])
+            for member in self.graph.nodes:
+                if member.folder == box.folder:
+                    member.tile = (member.tile[0] + shift, member.tile[1])
+
     def _line_tile_y(self, node, line: int) -> float:
         """Where a line sits inside a node, in tiles: the same for every zoom."""
         if node.kind != "file":
@@ -227,7 +343,7 @@ class Canvas(QWidget):
         if time.monotonic() - self._routes_built >= 0.15:
             self._rebuild_routes()
 
-    def _replan_near(self, node) -> None:
+    def _replan_near(self, node, *, thorough: bool = False) -> None:
         """Re-plan only the edges the moved node can have disturbed."""
         if self.graph is None or not self._routes:
             return
@@ -266,7 +382,7 @@ class Canvas(QWidget):
                     self._line_tile_y(target, edge.target_line),
                 ),
                 obstacles,
-                thorough=False,
+                thorough=thorough,
             )
 
         self._routes_built = time.monotonic()

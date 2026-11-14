@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtCore import QRect, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QFocusEvent,
@@ -42,6 +42,8 @@ class NodeEditor(QPlainTextEdit):
     Every node carries one of these, so editing on the canvas is editing the file: the
     contents are written back when the editor loses focus.
     """
+
+    content_changed = Signal()  # the text grew or shrank: the node must follow
 
     def __init__(self, path: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -233,6 +235,7 @@ class NodeEditor(QPlainTextEdit):
         """Forget the measurements and the fit; they are redone on the next sync."""
         self._content_dirty = True
         self._fitted = None
+        self.content_changed.emit()
 
     def save(self) -> None:
         if not self.document().isModified():
