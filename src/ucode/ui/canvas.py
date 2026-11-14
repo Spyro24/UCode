@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from math import hypot
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt
+from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import (
+    QClipboard,
     QColor,
     QFont,
     QFontMetricsF,
+    QGuiApplication,
     QMouseEvent,
     QPainter,
     QPainterPath,
@@ -44,6 +46,7 @@ NODE_HEADER_TILES = 1
 MIN_FRAME_ZOOM = 1.0  # nodes hold code, so they open at readable size
 EDITOR_MIN_ZOOM = 0.5  # below this the node bodies are not instantiated
 LABEL_MIN_ZOOM = 0.25  # names stay readable further out than the code does
+PAN_THRESHOLD_PX = 5  # a middle press that moves less than this is a paste, not a drag
 FONT_PIXELS = 11
 
 
@@ -68,6 +71,12 @@ class Canvas(QWidget):
         self._editors: dict[str, NodeEditor] = {}
         self._drag_origin: QPointF | None = None
         self._frame_pending = False
+
+        # A middle press that started on a node body: paste if it stays put, pan if not.
+        self._pan_press: QPointF | None = None
+        self._pan_editor: NodeEditor | None = None
+        self._pan_anchor: QPointF | None = None
+        self._pan_moved = False
 
     # -- content -------------------------------------------------------
     def set_graph(self, graph: FileGraph | None) -> None:
@@ -114,6 +123,7 @@ class Canvas(QWidget):
 
             if editor is None:
                 editor = NodeEditor(self.graph.root / node.path, self)
+                editor.installEventFilter(self)
                 self._editors[node.path] = editor
 
             # Floor, so the text always stays inside the node it was measured for.
@@ -341,6 +351,69 @@ class Canvas(QWidget):
         )
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
+    # -- middle button over a node -------------------------------------
+    def eventFilter(self, watched, event) -> bool:
+        """Middle button on a node body: a click pastes, a drag pans the canvas."""
+        if isinstance(watched, NodeEditor) and (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.MiddleButton
+        ):
+            self._pan_press = event.globalPosition()
+            self._pan_editor = watched
+            self._pan_anchor = event.position()
+            self._pan_moved = False
+            self._drag_origin = None
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            # Grab the canvas, so the drag keeps panning once it leaves the editor.
+            self.grabMouse()
+            return True
+
+        return super().eventFilter(watched, event)
+
+    def _end_middle(self) -> None:
+        self._pan_press = None
+        self._pan_editor = None
+        self._pan_anchor = None
+        self._pan_moved = False
+        self.releaseMouse()
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    @staticmethod
+    def _primary_selection() -> str:
+        """The X11 primary selection, empty where the platform has no such mode."""
+        return QGuiApplication.clipboard().text(QClipboard.Mode.Selection)
+
+    def _paste_selection(self) -> None:
+        """Paste the primary selection where the middle click landed."""
+        editor, anchor = self._pan_editor, self._pan_anchor
+        if editor is None or anchor is None:
+            return
+
+        text = self._primary_selection()
+        if text:
+            editor.cursorForPosition(anchor.toPoint()).insertText(text)
+
+    def _middle_drag(self, event: QMouseEvent) -> bool:
+        """Pan on a middle drag; return True while a middle press is being handled."""
+        if self._pan_editor is None or self._pan_press is None:
+            return False
+
+        delta = event.globalPosition() - self._pan_press
+
+        if not self._pan_moved:
+            if hypot(delta.x(), delta.y()) < PAN_THRESHOLD_PX:
+                return True
+            # Past the threshold this is a drag, not a click, so it must not paste.
+            self._pan_moved = True
+            self._pan_press = event.globalPosition()
+            return True
+
+        self.viewport.pan_by(delta.x(), delta.y())
+        self._pan_press = event.globalPosition()
+        self._sync_editors()
+        self.update()
+        return True
+
     # -- events --------------------------------------------------------
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -366,6 +439,9 @@ class Canvas(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._middle_drag(event):
+            return
+
         if self._drag_origin is None:
             super().mouseMoveEvent(event)
             return
@@ -377,6 +453,12 @@ class Canvas(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._pan_editor is not None and event.button() == Qt.MouseButton.MiddleButton:
+            if not self._pan_moved:
+                self._paste_selection()
+            self._end_middle()
+            return
+
         if self._drag_origin is not None:
             self._drag_origin = None
             self.setCursor(Qt.CursorShape.OpenHandCursor)

@@ -1,8 +1,9 @@
 """The file graph: one node per file, grouped into the folder that holds it.
 
 Every node is sized to the file it holds — as many lines as the file has — so nothing is
-hidden behind a scrollbar. Imports that do not resolve to a file in the project become
-their own chip nodes, collected in a last "imports" group.
+hidden behind a scrollbar. Every import that does not resolve to a project file becomes
+its own node: imports of one package are collected in that package's group, so
+``pygame.Rect`` and ``pygame.mouse`` sit inside the ``pygame`` group.
 
 Positions are computed in tile units, which is why the canvas needs no grid.
 """
@@ -35,9 +36,11 @@ CHIP_TILES = 1  # height of an import node
 CHIP_GAP = 0.5  # tiles between import nodes, tighter than files
 
 EXTERN_FOLDER = "~extern"
-EXTERN_LABEL = "imports"
+SYSTEM_LABEL = "system headers"  # group for <...> includes
 
-SUFFIXES = {".py", ".c", ".h"}
+FILE_SUFFIXES = {".py", ".c", ".h"}
+
+SUFFIXES = FILE_SUFFIXES
 SKIP_FOLDERS = {".git", ".venv", "__pycache__", "build", "dist", "node_modules", ".ucode"}
 
 
@@ -127,7 +130,7 @@ def import_size(label: str) -> tuple[int, int]:
 def _layout(
     files_by_folder: dict[str, list[tuple[str, int, int]]],
     root_label: str,
-    extern_names: list[str],
+    extern: dict[str, list[str]],
 ) -> tuple[list[Node], list[FolderBox]]:
     """Stack each folder's nodes, then place the boxes left to right."""
     nodes: list[Node] = []
@@ -189,38 +192,44 @@ def _layout(
         row_height = max(row_height, box_height)
         in_row += 1
 
-    if extern_names:
+    # One group per imported package, each holding a node per imported path.
+    for package in sorted(extern):
+        names = sorted(extern[package])
+        if not names:
+            continue
+
         if in_row == BOXES_PER_ROW:
             cursor_x = 0
             row_y += row_height + BOX_GAP
+            row_height = 0
             in_row = 0
 
-        widths = [import_size(name)[0] for name in extern_names]
-        column_width = max(widths)
+        column_width = max(import_size(name)[0] for name in names)
         box_width = PADDING * 2 + column_width
         box_height = (
             HEADER
             + PADDING * 2
-            + len(extern_names) * CHIP_TILES
-            + CHIP_GAP * (len(extern_names) - 1)
+            + len(names) * CHIP_TILES
+            + CHIP_GAP * (len(names) - 1)
         )
 
+        folder = f"{EXTERN_FOLDER}/{package}" if package else EXTERN_FOLDER
         boxes.append(
             FolderBox(
-                folder=EXTERN_FOLDER,
-                label=EXTERN_LABEL,
+                folder=folder,
+                label=package or SYSTEM_LABEL,
                 tile=(cursor_x, row_y),
                 size=(box_width, math.ceil(box_height)),
             )
         )
 
         y = row_y + HEADER + PADDING
-        for name in extern_names:
+        for name in names:
             nodes.append(
                 Node(
                     path=f"{EXTERN_FOLDER}/{name}",
                     label=name,
-                    folder=EXTERN_FOLDER,
+                    folder=folder,
                     tile=(cursor_x + PADDING, y),
                     size=(column_width, CHIP_TILES),
                     rows=1,
@@ -229,6 +238,10 @@ def _layout(
                 )
             )
             y += CHIP_TILES + CHIP_GAP
+
+        cursor_x += box_width + BOX_GAP
+        row_height = max(row_height, box_height)
+        in_row += 1
 
     return nodes, boxes
 
@@ -258,30 +271,42 @@ class _Lookup:
         return "" if parent == "." else parent
 
     def resolve(self, name: str, folder: str) -> str | None:
-        reference = Path(name)
+        if Path(name).suffix in FILE_SUFFIXES:
+            return self._resolve_file(name, folder)
+        return self._resolve_module(name, folder)
 
-        if reference.suffix:
-            # A full file name (an include): match the path, not just the stem, so
-            # ``native.h`` does not collapse onto ``native.c``.
-            candidates = self.by_name.get(reference.name, [])
-            wanted = name.lstrip("./")
-            for candidate in candidates:
-                if candidate == wanted or candidate.endswith("/" + wanted):
-                    return candidate
-            for candidate in candidates:
-                if self.folder_of(candidate) == folder:
-                    return candidate
-            return candidates[0] if candidates else None
+    def _resolve_file(self, name: str, folder: str) -> str | None:
+        # An include: match the path, not just the stem, so ``native.h`` does not
+        # collapse onto ``native.c``.
+        candidates = self.by_name.get(Path(name).name, [])
+        wanted = name.lstrip("./")
 
-        candidates = self.by_stem.get(name)
-        if candidates:
-            for candidate in candidates:
-                if self.folder_of(candidate) == folder:
-                    return candidate
-            return candidates[0]
+        for candidate in candidates:
+            if candidate == wanted or candidate.endswith("/" + wanted):
+                return candidate
+        for candidate in candidates:
+            if self.folder_of(candidate) == folder:
+                return candidate
+        return candidates[0] if candidates else None
+
+    def _resolve_module(self, name: str, folder: str) -> str | None:
+        # ``from a.b import c`` names ``a.b.c``; the module is either that path or
+        # its parent, so try both ends of the dotted name.
+        probes = [name]
+        if "." in name:
+            probes.append(name.rsplit(".", 1)[0])
+
+        for probe in probes:
+            candidates = self.by_stem.get(probe.rsplit(".", 1)[-1])
+            if candidates:
+                for candidate in candidates:
+                    if self.folder_of(candidate) == folder:
+                        return candidate
+                return candidates[0]
 
         # A package import: the module is a folder, so its __init__ is the target.
-        for candidate in (f"{name}/__init__.py", f"{folder}/{name}/__init__.py"):
+        for probe in probes:
+            candidate = f"{probe.replace('.', '/')}/__init__.py"
             if candidate in self.known:
                 return candidate
 
@@ -315,16 +340,24 @@ def build_file_graph(root: Path) -> FileGraph:
         ]
     )
 
-    # Anything that cannot become an edge between two files becomes an import chip.
-    extern: set[str] = set()
-    for candidate_names, system_names in references.values():
-        extern.update(system_names)
-        extern.update(
-            name for name in candidate_names if lookup.resolve(name, "") is None
-        )
+    # Every import that cannot become an edge between two files becomes a node,
+    # filed under its package.
+    extern: dict[str, set[str]] = {}
 
-    extern_names = sorted(extern)
-    nodes, boxes = _layout(files_by_folder, root.name or root.as_posix(), extern_names)
+    def add_extern(name: str, system: bool) -> None:
+        package = "" if system else name.split(".")[0]
+        extern.setdefault(package, set()).add(name)
+
+    for candidate_names, system_names in references.values():
+        for name in system_names:
+            add_extern(name, system=True)
+        for name in candidate_names:
+            if lookup.resolve(name, "") is None:
+                add_extern(name, system=False)
+
+    nodes, boxes = _layout(
+        files_by_folder, root.name or root.as_posix(), {k: sorted(v) for k, v in extern.items()}
+    )
 
     edges: list[Edge] = []
     seen: set[tuple[str, str]] = set()
@@ -337,8 +370,12 @@ def build_file_graph(root: Path) -> FileGraph:
 
         candidate_names, system_names = references[path]
 
-        for name in candidate_names + system_names:
-            target_path = lookup.resolve(name, folder) or f"{EXTERN_FOLDER}/{name}"
+        for name, system in [(n, False) for n in candidate_names] + [
+            (n, True) for n in system_names
+        ]:
+            target_path = None if system else lookup.resolve(name, folder)
+            if target_path is None:
+                target_path = f"{EXTERN_FOLDER}/{name}"
 
             if target_path == source:
                 continue
