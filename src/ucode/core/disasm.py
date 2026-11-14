@@ -51,14 +51,26 @@ _TARGET = re.compile(r"<([^>+]+)")
 _FLOW = re.compile(r"^(callq?|jmpq?|j[a-z]{1,3})\b")
 
 
+SOURCE_WIDTH = 72  # characters of the source line shown before it is cut
+
+
+@dataclass(slots=True)
+class Instruction:
+    """One machine instruction, and where DWARF says it came from."""
+
+    address: int
+    asm: str
+    source: str = ""  # the source file DWARF points at
+    line: int = 0
+
+
 @dataclass(slots=True)
 class Function:
     """One function's instructions, in address order."""
 
     name: str
     address: int
-    # (address, assembly, "source.c:12" or "")
-    instructions: list[tuple[int, str, str]] = field(default_factory=list)
+    instructions: list[Instruction] = field(default_factory=list)
     callees: list[tuple[str, int]] = field(default_factory=list)  # (name, line)
     source: str = ""  # the file the code came from, as DWARF names it
     source_label: str = ""  # what the graph files it under
@@ -103,19 +115,22 @@ def parse(text: str) -> list[Function]:
     functions: list[Function] = []
     current: Function | None = None
     source = ""
-    line = ""
+    number = 0
 
     for raw in text.splitlines():
         location = _LOCATION.match(raw)
         if location is not None and not _INSN.match(raw):
             source = location.group(1)
-            line = f"{Path(source).name}:{location.group(2)}"
+            number = int(location.group(2))
             continue
 
         header = _HEADER.match(raw)
         if header is not None:
             current = Function(name=header.group(2), address=int(header.group(1), 16))
             functions.append(current)
+            # A location belongs to the code that follows it, never to the next symbol.
+            source = ""
+            number = 0
             continue
 
         if current is None:
@@ -125,12 +140,16 @@ def parse(text: str) -> list[Function]:
         if instruction is None:
             continue
 
-        if line and not current.source:
-            current.source = source
-
-        current.instructions.append(
-            (int(instruction.group(1), 16), instruction.group(2), line)
+        found = Instruction(
+            address=int(instruction.group(1), 16),
+            asm=instruction.group(2),
+            source=source if number else "",
+            line=number,
         )
+        if found.source and not current.source:
+            current.source = found.source
+
+        current.instructions.append(found)
 
     return [function for function in functions if function.instructions]
 
@@ -141,7 +160,8 @@ def _link(functions: list[Function]) -> None:
 
     for function in functions:
         seen: set[str] = set()
-        for index, (_address, asm, _line) in enumerate(function.instructions):
+        for index, instruction in enumerate(function.instructions):
+            asm = instruction.asm
             if not _FLOW.match(asm):
                 continue
             target = _TARGET.search(asm)
@@ -154,31 +174,85 @@ def _link(functions: list[Function]) -> None:
             function.callees.append((name, index + 1))
 
 
-def _body(function: Function) -> str:
-    """The node's text: the symbol line, then an instruction per line with its source."""
+def _body(
+    function: Function, label_of: dict[str, str], sources: dict[str, list[str]]
+) -> str:
+    """The node's text: the symbol line, then an instruction per line with its source.
+
+    The DWARF location and the source text appear only where they change, so the
+    assembly stays the thing you read while the source explains it.
+    """
     lines = [f"{function.name}:   /* 0x{function.address:x} */"]
 
     width = max(
-        (len(f"0x{address:x}") for address, _asm, _line in function.instructions),
+        (len(f"0x{instruction.address:x}") for instruction in function.instructions),
         default=4,
     )
-    location_width = min(
-        LOCATION_WIDTH,
-        max((len(line) for _a, _s, line in function.instructions), default=0),
-    )
-
+    headings = [_heading(instruction, label_of) for instruction in function.instructions]
+    location_width = min(LOCATION_WIDTH, max((len(h) for h in headings), default=0))
     previous = ""
-    for address, asm, line in function.instructions:
-        # The source line only where it changes; repeating it on every instruction
-        # would bury the assembly.
-        left = line if line != previous else ""
-        previous = line
+    for instruction, heading in zip(function.instructions, headings):
+        left = heading if heading != previous else ""
+        fresh = heading != previous
+        previous = heading
+
+        address = f"0x{instruction.address:x}"
+        parts = []
         if location_width:
-            lines.append(f"{left:<{location_width}}  {f'0x{address:x}':<{width}}  {asm}")
-        else:
-            lines.append(f"{f'0x{address:x}':<{width}}  {asm}")
+            parts.append(f"{left:<{location_width}}  ")
+        parts.append(f"{address:<{width}}  {instruction.asm}")
+
+        text = _source_text(instruction, sources) if fresh else ""
+        if text:
+            parts.append(f"  | {text}")
+
+        lines.append("".join(parts).rstrip())
 
     return "\n".join(lines)
+
+
+def _heading(instruction: Instruction, label_of: dict[str, str]) -> str:
+    """``main.c:12`` for an instruction, or "" when DWARF does not place it."""
+    if not instruction.source or not instruction.line:
+        return ""
+    label = label_of.get(instruction.source)
+    return f"{label}:{instruction.line}" if label else ""
+
+
+def _source_text(instruction: Instruction, sources: dict[str, list[str]]) -> str:
+    """The source line an instruction came from, when the file can still be read."""
+    rows = sources.get(instruction.source)
+    if not rows or not 0 < instruction.line <= len(rows):
+        return ""
+
+    text = rows[instruction.line - 1].strip()
+    if len(text) > SOURCE_WIDTH:
+        text = text[: SOURCE_WIDTH - 1] + "\u2026"
+    return text
+
+
+def _read_sources(paths: list[str], binary_dir: Path) -> dict[str, list[str]]:
+    """Read the files DWARF names, once each; missing ones are simply absent."""
+    found: dict[str, list[str]] = {}
+
+    for name in paths:
+        candidate = Path(name)
+        for option in (
+            candidate,
+            binary_dir / candidate,
+            binary_dir.parent / candidate,
+        ):
+            if not option.is_file():
+                continue
+            try:
+                found[name] = option.read_text(
+                    encoding="utf-8", errors="replace"
+                ).split("\n")
+            except OSError:
+                pass
+            break
+
+    return found
 
 
 def _label_source(files: list[str]) -> dict[str, str]:
@@ -223,14 +297,28 @@ def build_graph(
     functions = functions[:MAX_FUNCTIONS]
     _link(functions)
 
-    has_lines = any(line for function in functions for _a, _s, line in function.instructions)
-    labels = _label_source(
-        sorted({function.source for function in functions if function.source})
+    has_lines = any(
+        instruction.line
+        for function in functions
+        for instruction in function.instructions
     )
+    files = sorted(
+        {
+            instruction.source
+            for function in functions
+            for instruction in function.instructions
+            if instruction.source
+        }
+    )
+    labels = _label_source(files)
+    # The source itself, when the files the binary was built from are still around.
+    sources = _read_sources(files, path.parent)
     for function in functions:
         function.source_label = labels.get(function.source, "")
 
-    bodies = {function.name: _body(function) for function in functions}
+    bodies = {
+        function.name: _body(function, labels, sources) for function in functions
+    }
 
     # One box per source file: DWARF tells which file each function was built from.
     groups: dict[str, list[Function]] = {}
@@ -329,9 +417,10 @@ def build_graph(
         graph.synthetic[node_paths[function.name]] = (bodies[function.name], "readonly")
 
     note = f"{len(functions)} functions"
-    files = len([label for label in groups if label])
-    if has_lines and files:
-        note += f" · DWARF line info · {files} files"
+    shown = len([label for label in groups if label])
+    if has_lines and shown:
+        detail = "DWARF + source" if sources else "DWARF line info"
+        note += f" · {detail} · {shown} files"
     else:
         note += " · no DWARF"
     if truncated:
