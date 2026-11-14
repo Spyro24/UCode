@@ -27,14 +27,14 @@ CHAR_PX = 7  # measured advance at the base size is 6.61, so this is safe
 LINE_PX = 13  # measured line spacing at the base size is 12.80, plus a little slack
 HEADER_PX = TILE
 EDITOR_PAD_PX = 14
-MIN_NODE_PX = (140, 96)  # a floor for nearly-empty files, not a target size
+MIN_NODE_PX = (168, 120)  # a floor for nearly-empty files, not a target size
 MAX_COLUMNS = 300  # longer lines scroll horizontally rather than growing the node forever
 
 PADDING = 0.5  # tiles between a folder box edge and the nodes inside it
 HEADER = 1  # tiles reserved for the folder's name
 GAP = 0.75  # tiles between nodes in the same folder
 BOX_GAP = 2  # tiles between folder boxes
-BOXES_PER_ROW = 4
+LAYOUT_ASPECT = 1.7  # the shape the arrangement aims for: wider than tall, like the canvas
 
 CHIP_TILES = 1  # height of an import node
 CHIP_GAP = 0.5  # tiles between import nodes, tighter than files
@@ -164,68 +164,158 @@ def import_size(label: str) -> tuple[float, float]:
     return (width_px / TILE, CHIP_TILES)
 
 
+@dataclass(slots=True)
+class _Group:
+    """One folder box, laid out locally before the boxes are arranged on the canvas."""
+
+    folder: str
+    label: str
+    kind: str  # "file" or "import"
+    names: list[str]
+    rows: list[int]
+    columns: list[int]
+    sizes: list[tuple[float, float]]
+    offsets: list[tuple[float, float]]
+    content: tuple[float, float]
+
+
+def _pack_columns(
+    sizes: list[tuple[float, float]], gap: float
+) -> tuple[list[tuple[float, float]], float, float]:
+    """Arrange items into the number of columns that best fits the target shape.
+
+    One column turns a folder into a very tall strip; too many leave wide gaps. Each
+    candidate is scored on how close its box is to the layout aspect, then on area.
+    """
+    if not sizes:
+        return [], 0.0, 0.0
+
+    best: tuple[float, float, list[tuple[float, float]], float, float] | None = None
+
+    for count in range(1, len(sizes) + 1):
+        assignments: list[list[int]] = [[] for _ in range(count)]
+        heights = [0.0] * count
+
+        for index, size in enumerate(sizes):
+            column = min(range(count), key=lambda i: heights[i])
+            assignments[column].append(index)
+            heights[column] += size[1] + gap
+
+        widths = [
+            max((sizes[i][0] for i in column), default=0.0) for column in assignments
+        ]
+        width = sum(widths) + gap * (count - 1)
+        height = max((h - gap for h in heights), default=0.0)
+
+        offsets: list[tuple[float, float]] = [(0.0, 0.0)] * len(sizes)
+        x = 0.0
+        for column, indices in enumerate(assignments):
+            y = 0.0
+            for index in indices:
+                offsets[index] = (x, y)
+                y += sizes[index][1] + gap
+            x += widths[column] + gap
+
+        aspect = width / height if height > 0 else float("inf")
+        score = abs(math.log(aspect / LAYOUT_ASPECT)) if aspect > 0 else 99.0
+        candidate = (score, width * height, offsets, width, height)
+
+        if best is None or candidate[:2] < best[:2]:
+            best = candidate
+
+    assert best is not None
+    return best[2], best[3], best[4]
+
+
+def _shelf_pack(
+    boxes: list[FolderBox], gap: float, target: float, tallest_first: bool
+) -> tuple[dict[str, tuple[float, float]], float, float]:
+    """Fill rows up to ``target`` width and stack the rows."""
+    key = (
+        (lambda b: (-b.size[1], b.label))
+        if tallest_first
+        else (lambda b: (-b.size[0], b.label))
+    )
+
+    positions: dict[str, tuple[float, float]] = {}
+    x = 0.0
+    y = 0.0
+    row_height = 0.0
+
+    for box in sorted(boxes, key=key):
+        if x > 0 and x + box.size[0] > target:
+            x = 0.0
+            y += row_height + gap
+            row_height = 0.0
+
+        positions[box.folder] = (x, y)
+        x += box.size[0] + gap
+        row_height = max(row_height, box.size[1])
+
+    width = max(positions[b.folder][0] + b.size[0] for b in boxes)
+    height = max(positions[b.folder][1] + b.size[1] for b in boxes)
+    return positions, width, height
+
+
+def _pack_boxes(boxes: list[FolderBox], gap: float) -> None:
+    """Try a range of row widths and keep the arrangement shaped like the canvas."""
+    if not boxes:
+        return
+
+    area = sum((b.size[0] + gap) * (b.size[1] + gap) for b in boxes)
+    base = math.sqrt(area * LAYOUT_ASPECT)
+    widest = max(b.size[0] for b in boxes)
+
+    best: tuple[tuple[float, float], dict[str, tuple[float, float]]] | None = None
+
+    for tallest_first in (True, False):
+        for factor in (0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.35, 1.5, 1.7):
+            target = max(widest, base * factor)
+            positions, width, height = _shelf_pack(
+                boxes, gap, target, tallest_first
+            )
+            if height <= 0:
+                continue
+
+            score = abs(math.log((width / height) / LAYOUT_ASPECT))
+            candidate = (round(score, 3), width * height)
+
+            if best is None or candidate < best[0]:
+                best = (candidate, positions)
+
+    assert best is not None
+    for box in boxes:
+        box.tile = best[1][box.folder]
+
+
 def _layout(
     files_by_folder: dict[str, list[tuple[str, int, int]]],
     root_label: str,
     extern: dict[str, list[str]],
 ) -> tuple[list[Node], list[FolderBox]]:
-    """Stack each folder's nodes, then place the boxes left to right."""
-    nodes: list[Node] = []
-    boxes: list[FolderBox] = []
-
-    cursor_x = 0
-    row_y = 0
-    row_height = 0
-    in_row = 0
+    """Lay each folder out, then arrange the boxes into a canvas-shaped block."""
+    groups: list[_Group] = []
 
     for folder in sorted(files_by_folder):
         entries = sorted(files_by_folder[folder])
         # Each node keeps its own width, so a short file is not stretched to the width of
         # the longest one beside it.
         sizes = [node_size(rows, columns) for _, rows, columns in entries]
+        offsets, width, height = _pack_columns(sizes, GAP)
 
-        width = box_width(max(size[0] for size in sizes), root_label if folder == "" else folder)
-        box_height = (
-            HEADER
-            + PADDING * 2
-            + sum(size[1] for size in sizes)
-            + GAP * (len(entries) - 1)
-        )
-
-        if in_row == BOXES_PER_ROW:
-            cursor_x = 0
-            row_y += row_height + BOX_GAP
-            row_height = 0
-            in_row = 0
-
-        boxes.append(
-            FolderBox(
+        groups.append(
+            _Group(
                 folder=folder,
                 label=root_label if folder == "" else folder,
-                tile=(cursor_x, row_y),
-                size=(width, box_height),
+                kind="file",
+                names=[name for name, _, _ in entries],
+                rows=[rows for _, rows, _ in entries],
+                columns=[columns for _, _, columns in entries],
+                sizes=sizes,
+                offsets=offsets,
+                content=(width, height),
             )
         )
-
-        y = row_y + HEADER + PADDING
-        for (name, rows, columns), size in zip(entries, sizes):
-            relative = f"{folder}/{name}" if folder else name
-            nodes.append(
-                Node(
-                    path=relative,
-                    label=name,
-                    folder=folder,
-                    tile=(cursor_x + PADDING, y),
-                    size=size,
-                    rows=rows,
-                    columns=columns,
-                )
-            )
-            y += size[1] + GAP
-
-        cursor_x += width + BOX_GAP
-        row_height = max(row_height, box_height)
-        in_row += 1
 
     # One group per imported package, each holding a node per imported path.
     for package in sorted(extern):
@@ -233,51 +323,62 @@ def _layout(
         if not names:
             continue
 
-        if in_row == BOXES_PER_ROW:
-            cursor_x = 0
-            row_y += row_height + BOX_GAP
-            row_height = 0
-            in_row = 0
-
         sizes = [import_size(name) for name in names]
-        label = package or SYSTEM_LABEL
-        width = box_width(max(size[0] for size in sizes), label)
-        box_height = (
-            HEADER
-            + PADDING * 2
-            + len(names) * CHIP_TILES
-            + CHIP_GAP * (len(names) - 1)
-        )
+        offsets, width, height = _pack_columns(sizes, CHIP_GAP)
 
-        folder = f"{EXTERN_FOLDER}/{package}" if package else EXTERN_FOLDER
-        boxes.append(
-            FolderBox(
-                folder=folder,
-                label=label,
-                tile=(cursor_x, row_y),
-                size=(width, box_height),
+        groups.append(
+            _Group(
+                folder=f"{EXTERN_FOLDER}/{package}" if package else EXTERN_FOLDER,
+                label=package or SYSTEM_LABEL,
+                kind="import",
+                names=names,
+                rows=[1] * len(names),
+                columns=[len(name) for name in names],
+                sizes=sizes,
+                offsets=offsets,
+                content=(width, height),
             )
         )
 
-        y = row_y + HEADER + PADDING
-        for index, name in enumerate(names):
+    boxes = [
+        FolderBox(
+            folder=group.folder,
+            label=group.label,
+            tile=(0.0, 0.0),
+            size=(
+                box_width(group.content[0], group.label),
+                HEADER + PADDING * 2 + group.content[1],
+            ),
+        )
+        for group in groups
+    ]
+
+    _pack_boxes(boxes, BOX_GAP)
+
+    nodes: list[Node] = []
+    for group, box in zip(groups, boxes):
+        for index, name in enumerate(group.names):
+            offset = group.offsets[index]
+            path = (
+                f"{EXTERN_FOLDER}/{name}"
+                if group.kind == "import"
+                else (f"{group.folder}/{name}" if group.folder else name)
+            )
             nodes.append(
                 Node(
-                    path=f"{EXTERN_FOLDER}/{name}",
+                    path=path,
                     label=name,
-                    folder=folder,
-                    tile=(cursor_x + PADDING, y),
-                    size=sizes[index],
-                    rows=1,
-                    columns=len(name),
-                    kind="import",
+                    folder=group.folder,
+                    tile=(
+                        box.tile[0] + PADDING + offset[0],
+                        box.tile[1] + HEADER + PADDING + offset[1],
+                    ),
+                    size=group.sizes[index],
+                    rows=group.rows[index],
+                    columns=group.columns[index],
+                    kind=group.kind,
                 )
             )
-            y += CHIP_TILES + CHIP_GAP
-
-        cursor_x += width + BOX_GAP
-        row_height = max(row_height, box_height)
-        in_row += 1
 
     return nodes, boxes
 
