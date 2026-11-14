@@ -32,6 +32,12 @@ def config_path() -> Path:
     return config_dir() / CONFIG_FILE
 
 
+def _parse_project(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
 def _parse_mode(value: object) -> ViewMode:
     if isinstance(value, str):
         try:
@@ -46,6 +52,7 @@ class Config:
     """Everything remembered between runs."""
 
     mode: ViewMode = ViewMode.TEXT
+    project: str | None = None  # last opened folder
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -59,14 +66,20 @@ class Config:
         if not isinstance(raw, dict):
             return cls()
 
-        return cls(mode=_parse_mode(raw.get("mode")))
+        return cls(
+            mode=_parse_mode(raw.get("mode")),
+            project=_parse_project(raw.get("project")),
+        )
 
     def save(self, path: Path | None = None) -> None:
         """Write atomically, so a crash mid-write cannot truncate the config."""
         target = config_path() if path is None else path
         target.parent.mkdir(parents=True, exist_ok=True)
 
-        payload = json.dumps({"mode": self.mode.value}, indent=2) + "\n"
+        data: dict[str, object] = {"mode": self.mode.value}
+        if self.project:
+            data["project"] = self.project
+        payload = json.dumps(data, indent=2) + "\n"
 
         handle = tempfile.NamedTemporaryFile(
             "w",
