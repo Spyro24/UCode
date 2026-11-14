@@ -7,17 +7,17 @@ from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QMenu, QSplitter, QWidget
 
 from ucode.ui.panel_toggle import PanelToggle
-from ucode.ui.right_panel import RightPanel
+from ucode.ui.side_panel import SidePanel
 from ucode.ui.sidebar import SideBar
+from ucode.ui.work_area import WorkArea
 
 
 class MainWindow(QMainWindow):
     """Application window.
 
-    Layout: menu bar on top, tile-wide sidebar on the left, canvas in the middle with a
-    one-tile toggle column on its right edge, and the right panel — closed by default,
-    five tiles wide when open. The menus and every area are empty for now; contents
-    arrive in M2.
+    Layout, left to right: the tile-wide sidebar, the work area (editor over console),
+    the contextual side panel, and the tile-wide toggle strip on the far right edge that
+    opens and closes that panel. The menus and every area are empty for now.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -31,7 +31,7 @@ class MainWindow(QMainWindow):
         self._build_menu_bar()
         self._build_central_area()
 
-        self.right_panel.hide()
+        self.side_panel.hide()
 
     def _build_menu_bar(self) -> None:
         menu_bar = self.menuBar()
@@ -51,53 +51,51 @@ class MainWindow(QMainWindow):
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setHandleWidth(1)
 
-        # Canvas side of the splitter: the canvas plus the toggle column on its edge,
-        # so the toggle sits between the left sidebar and the right panel.
-        self.canvas_container = QWidget(self.splitter)
-        canvas_layout = QHBoxLayout(self.canvas_container)
-        canvas_layout.setContentsMargins(0, 0, 0, 0)
-        canvas_layout.setSpacing(0)
+        self.work_area = WorkArea(self.splitter)
+        self.side_panel = SidePanel(self.splitter)
 
-        self.canvas_area = QWidget(self.canvas_container)
-        self.canvas_area.setObjectName("canvasArea")
-        self.panel_toggle = PanelToggle(self.canvas_container)
-
-        canvas_layout.addWidget(self.canvas_area, 1)
-        canvas_layout.addWidget(self.panel_toggle)
-
-        self.right_panel = RightPanel(self.splitter)
-
-        self.splitter.addWidget(self.canvas_container)
-        self.splitter.addWidget(self.right_panel)
+        self.splitter.addWidget(self.work_area)
+        self.splitter.addWidget(self.side_panel)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)
 
+        # The toggle sits outside the splitter so it stays on the window edge and remains
+        # visible while the panel is absent.
+        self.panel_toggle = PanelToggle(central)
+
         root.addWidget(self.side_bar)
         root.addWidget(self.splitter, 1)
+        root.addWidget(self.panel_toggle)
 
         self.setCentralWidget(central)
 
-        self.panel_toggle.button.clicked.connect(self.toggle_right_panel)
+        self.panel_toggle.button.clicked.connect(self.toggle_side_panel)
 
     def showEvent(self, event: QShowEvent) -> None:
-        """Hand the canvas the full width once the window has a real size."""
+        """Hand the whole width to the work area once the window has a real size."""
         super().showEvent(event)
 
         if not self._split_applied:
             self._split_applied = True
             self.splitter.setSizes([self.splitter.width(), 0])
 
-    def toggle_right_panel(self) -> None:
-        """Open or close the right panel; opening gives it its default five tiles."""
-        if self.right_panel.isVisible():
-            self.right_panel.hide()
-            self.panel_toggle.button.setChecked(False)
-            return
-
-        self.right_panel.show()
+    def open_side_panel(self) -> None:
+        """Show the side panel at its default five tiles."""
+        self.side_panel.show()
         self.panel_toggle.button.setChecked(True)
 
         available = self.splitter.width()
         self.splitter.setSizes(
-            [max(available - RightPanel.WIDTH, 0), RightPanel.WIDTH]
+            [max(available - SidePanel.WIDTH, 0), SidePanel.WIDTH]
         )
+
+    def close_side_panel(self) -> None:
+        """Remove the side panel again; the work area takes the width back."""
+        self.side_panel.hide()
+        self.panel_toggle.button.setChecked(False)
+
+    def toggle_side_panel(self) -> None:
+        if self.side_panel.isVisible():
+            self.close_side_panel()
+        else:
+            self.open_side_panel()
