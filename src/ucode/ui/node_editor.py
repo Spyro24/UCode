@@ -79,6 +79,8 @@ class NodeEditor(QPlainTextEdit):
 
         # The size the text was last fitted to, so moving a node does not re-fit it.
         self._fitted: tuple[int, int, int, int] | None = None
+        self._lines: list[str] = []
+        self._content_dirty = True
 
         self._gutter = _LineNumbers(self)
         self.blockCountChanged.connect(self._update_gutter_width)
@@ -86,6 +88,8 @@ class NodeEditor(QPlainTextEdit):
         self._update_gutter_width()
 
         self.document().setModified(False)
+        # Editing changes how much room the text needs, so the fit has to be redone.
+        self.document().contentsChanged.connect(self._mark_content_changed)
 
     # -- gutter --------------------------------------------------------
     def gutter_width(self) -> int:
@@ -154,6 +158,9 @@ class NodeEditor(QPlainTextEdit):
         font = self.font()
         font.setPixelSize(max(3, pixels))
         self.setFont(font)
+        # The document needs the font too, or measuring what it will render uses the old
+        # metrics and lets an oversized font through.
+        self.document().setDefaultFont(font)
         self._update_tab_width()
         self._update_gutter_width()
         self._gutter.update()
@@ -166,6 +173,15 @@ class NodeEditor(QPlainTextEdit):
         distance from 1:1. Solving for the box keeps the code flush with its edges at
         every zoom, and the shrink loop below guarantees nothing is clipped either.
         """
+        # What the document actually holds, in case the file changed under the node.
+        if self._content_dirty:
+            self._lines = self.toPlainText().split("\n")
+            self._content_dirty = False
+
+        lines = self._lines
+        rows = max(1, rows, len(lines))
+        columns = max(1, columns, max(len(line) for line in lines))
+
         # Fitting relayouts the whole document, so only do it when the box changed.
         key = (width, height, columns, rows)
         if key == self._fitted:
@@ -194,15 +210,29 @@ class NodeEditor(QPlainTextEdit):
             self.set_font_size(size)
             metrics = self.fontMetrics()
             advance = metrics.horizontalAdvance("9")
+
             # The gutter takes its own slice of the width, so count it exactly.
             gutter = max(6, round(advance * (digits + 1.2)))
-            needed_width = advance * max(1, columns) + gutter + 4
-            needed_height = metrics.lineSpacing() * max(1, rows) + 2
+            available = width - gutter
+            if available < 8:
+                continue
 
-            if needed_width <= width and needed_height <= height:
-                return
+            # Measure the widest line itself: an estimate in whole characters can be a
+            # character out, and a size that overflows is skipped for the next one down.
+            widest = max(metrics.horizontalAdvance(line) for line in lines)
+            if widest + 2 > available:
+                continue
+            if metrics.lineSpacing() * rows + 2 > height:
+                continue
+
+            return
 
         self.set_font_size(3)
+
+    def _mark_content_changed(self) -> None:
+        """Forget the measurements and the fit; they are redone on the next sync."""
+        self._content_dirty = True
+        self._fitted = None
 
     def save(self) -> None:
         if not self.document().isModified():
