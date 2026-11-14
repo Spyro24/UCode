@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import QFrame, QVBoxLayout, QWidget
 
 from ucode.core.tile import TILE
+from ucode.ui.theme import BG_PANEL, BORDER
 
 
 class SidePanel(QFrame):
@@ -23,6 +24,10 @@ class SidePanel(QFrame):
 
         self.setObjectName("sidePanel")
         self.setMinimumWidth(TILE)
+        self.setStyleSheet(
+            f"#sidePanel {{ background-color: {BG_PANEL};"
+            f" border-left: 1px solid {BORDER}; }}"
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

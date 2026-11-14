@@ -7,8 +7,9 @@ from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPaintEvent, QWheelEven
 from PySide6.QtWidgets import QWidget
 
 from ucode.core.viewport import Viewport
+from ucode.ui.theme import BG_SURFACE
 
-BACKGROUND = QColor("#fcfcfd")
+BACKGROUND = QColor(BG_SURFACE)
 ZOOM_PER_NOTCH = 1.2
 
 

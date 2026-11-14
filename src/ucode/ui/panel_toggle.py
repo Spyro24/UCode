@@ -6,6 +6,14 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFrame, QPushButton, QVBoxLayout, QWidget
 
 from ucode.core.tile import TILE
+from ucode.ui.theme import (
+    BG_CHROME,
+    BG_CONTROL_HOVER,
+    BG_CONTROL_PRESSED,
+    BORDER,
+    TEXT,
+    TEXT_MUTED,
+)
 
 GLYPH = "\u25a4"  # ▤ — a panel icon, drawn as text so no icon asset is needed yet
 
@@ -26,7 +34,8 @@ class PanelToggle(QFrame):
         self.setObjectName("panelToggle")
         self.setFixedWidth(self.WIDTH)
         self.setStyleSheet(
-            "#panelToggle { background-color: #22252b; border-left: 1px solid #2f333b; }"
+            f"#panelToggle {{ background-color: {BG_CHROME};"
+            f" border-left: 1px solid {BORDER}; }}"
         )
 
         self.button = QPushButton(GLYPH, self)
@@ -36,10 +45,11 @@ class PanelToggle(QFrame):
         self.button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.button.setToolTip("Show or hide the panel")
         self.button.setStyleSheet(
-            "#panelToggleButton { color: #b9c0cc; background: transparent; border: none;"
-            " font-size: 18px; }"
-            "#panelToggleButton:hover { background-color: #2c3038; }"
-            "#panelToggleButton:checked { background-color: #333844; color: #e6ebf2; }"
+            f"#panelToggleButton {{ color: {TEXT_MUTED}; background: transparent;"
+            f" border: none; font-size: 18px; }}"
+            f"#panelToggleButton:hover {{ background-color: {BG_CONTROL_HOVER}; }}"
+            f"#panelToggleButton:checked {{ background-color: {BG_CONTROL_PRESSED};"
+            f" color: {TEXT}; }}"
         )
 
         layout = QVBoxLayout(self)

@@ -7,6 +7,7 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from ucode.ui.main_window import MainWindow
+from ucode.ui.theme import apply_dark_theme
 
 APP_NAME = "UCode"
 
@@ -18,6 +19,7 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(args)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
+    apply_dark_theme(app)
 
     window = MainWindow()
     window.show()

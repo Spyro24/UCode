@@ -7,6 +7,7 @@ from enum import Enum
 from PySide6.QtWidgets import QFrame, QVBoxLayout, QWidget
 
 from ucode.core.tile import TILE
+from ucode.ui.theme import BG_CONSOLE, BORDER
 
 
 class ConsoleMode(str, Enum):
@@ -38,7 +39,8 @@ class Console(QFrame):
         self.setObjectName("console")
         self.setMinimumHeight(TILE)
         self.setStyleSheet(
-            "#console { background-color: #eef1f5; border-top: 1px solid #c7ced9; }"
+            f"#console {{ background-color: {BG_CONSOLE};"
+            f" border-top: 1px solid {BORDER}; }}"
         )
 
         self._layout = QVBoxLayout(self)

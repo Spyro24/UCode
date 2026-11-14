@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import QFrame, QVBoxLayout, QWidget
 
 from ucode.core.tile import TILE
+from ucode.ui.theme import BG_CHROME, BORDER
 
 
 class SideBar(QFrame):
@@ -22,7 +23,8 @@ class SideBar(QFrame):
         self.setObjectName("sideBar")
         self.setFixedWidth(self.WIDTH)
         self.setStyleSheet(
-            "#sideBar { background-color: #22252b; border-right: 1px solid #2f333b; }"
+            f"#sideBar {{ background-color: {BG_CHROME};"
+            f" border-right: 1px solid {BORDER}; }}"
         )
 
         self._layout = QVBoxLayout(self)

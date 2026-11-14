@@ -6,8 +6,14 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
 
 from ucode.core.tile import TILE
-
-BACKGROUND = "#fcfcfd"
+from ucode.ui.theme import (
+    BG_CONTROL,
+    BG_CONTROL_HOVER,
+    BG_CONTROL_PRESSED,
+    BG_SURFACE,
+    BORDER_STRONG,
+    TEXT,
+)
 
 
 class EmptyState(QWidget):
@@ -23,18 +29,20 @@ class EmptyState(QWidget):
         super().__init__(parent)
 
         self.setObjectName("emptyState")
-        self.setStyleSheet(f"#emptyState {{ background-color: {BACKGROUND}; }}")
+        # A plain QWidget needs this attribute before a stylesheet background is painted.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"#emptyState {{ background-color: {BG_SURFACE}; }}")
 
         self.button = QPushButton("Open Folder", self)
         self.button.setObjectName("openFolderButton")
         self.button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.button.setMinimumSize(TILE * 3, int(TILE * 1.1))
         self.button.setStyleSheet(
-            "#openFolderButton { font-size: 14px; color: #2b3038;"
-            " background-color: #eef1f5; border: 1px solid #c7ced9;"
+            f"#openFolderButton {{ font-size: 14px; color: {TEXT};"
+            f" background-color: {BG_CONTROL}; border: 1px solid {BORDER_STRONG};"
             " border-radius: 4px; padding: 0 18px; }"
-            "#openFolderButton:hover { background-color: #e2e7ee; }"
-            "#openFolderButton:pressed { background-color: #d6dce5; }"
+            f"#openFolderButton:hover {{ background-color: {BG_CONTROL_HOVER}; }}"
+            f"#openFolderButton:pressed {{ background-color: {BG_CONTROL_PRESSED}; }}"
         )
         self.button.clicked.connect(self.folder_requested)
 
