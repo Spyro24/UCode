@@ -69,6 +69,11 @@ class MainWindow(QMainWindow):
         self.edit_menu: QMenu = menu_bar.addMenu("&Edit")
         self.mode_menu: QMenu = menu_bar.addMenu("&Mode")
         self.run_menu: QMenu = menu_bar.addMenu("&Run")
+        self.misc_menu: QMenu = menu_bar.addMenu("&Misc")
+
+        self.relayout_action = QAction("Recompute Best Layout", self)
+        self.relayout_action.triggered.connect(self.recompute_layout)
+        self.misc_menu.addAction(self.relayout_action)
 
         self.open_project_action = QAction("Open Project\u2026", self)
         self.open_project_action.setShortcut(QKeySequence.StandardKey.Open)
@@ -203,6 +208,20 @@ class MainWindow(QMainWindow):
         if canvas.graph is not None and not self._graph_framed:
             self._graph_framed = True
             canvas.frame_graph()
+
+    def recompute_layout(self) -> None:
+        """Throw away the hand-placed arrangement and lay the project out afresh."""
+        if self.folder is None:
+            return
+
+        project = str(self.folder)
+        self.config.positions.pop(project, None)
+        self.config.folders.pop(project, None)
+        self._save_config()
+
+        self.graph = build_file_graph(self.folder)
+        self._graph_framed = False
+        self._sync_graph()
 
     def _remember_positions(self) -> None:
         """Keep where the nodes were dropped, in the config, for this project."""
