@@ -7,6 +7,7 @@ from pathlib import Path
 from PySide6.QtGui import QFocusEvent, QFont
 from PySide6.QtWidgets import QFrame, QPlainTextEdit, QWidget
 
+from ucode.ui.highlighters import highlighter_for
 from ucode.ui.theme import BG_NODE_EDITOR, TEXT
 
 SELECTION = "#3b5480"
@@ -43,6 +44,9 @@ class NodeEditor(QPlainTextEdit):
             self.setPlainText(path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             self.setPlainText("")
+
+        # Kept as an attribute: the document does not own its highlighter.
+        self.highlighter = highlighter_for(path, self.document())
 
         self.document().setModified(False)
 

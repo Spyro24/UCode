@@ -32,6 +32,15 @@ GRAPH_NODE_BORDER = "#3a4352"
 GRAPH_EDGE = "#4c5768"
 BG_NODE_EDITOR = "#20252e"
 
+# -- syntax -----------------------------------------------------------
+SYNTAX_KEYWORD = "#c678dd"
+SYNTAX_NUMBER = "#d19a66"
+SYNTAX_STRING = "#98c379"
+SYNTAX_COMMENT = "#6b7482"
+SYNTAX_FUNCTION = "#61afef"
+SYNTAX_DECORATOR = "#e5c07b"
+SYNTAX_PREPROCESSOR = "#56b6c2"
+
 TEXT = "#d7dce5"
 TEXT_MUTED = "#8b93a1"
 ACCENT = "#4c8dff"
