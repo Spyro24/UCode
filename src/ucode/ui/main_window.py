@@ -407,7 +407,7 @@ class MainWindow(QMainWindow):
             args = run.debug_command(target)
             if not args:
                 console.notice(
-                    f"live debugging runs Python scripts; {target.name} is not one",
+                    f"live debugging runs Python code; {target.name} is not Python",
                     error=True,
                 )
                 return
@@ -416,7 +416,7 @@ class MainWindow(QMainWindow):
             args = run.command(target)
             if not args:
                 console.notice(
-                    f"{target.name} is neither a Python script nor an executable",
+                    f"{target.name} is neither Python code nor an executable",
                     error=True,
                 )
                 return

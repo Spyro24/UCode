@@ -33,9 +33,33 @@ def entry_point(folder: Path | None) -> Path | None:
     return None
 
 
+# A file this large is not a script anyone is editing here; do not read it to find out.
+SNIFF_LIMIT = 4 * 1024 * 1024
+
+
+def is_python(target: Path) -> bool:
+    """True when ``target`` holds code Python accepts, whatever the file is called."""
+    if target.suffix == ".py":
+        return True
+
+    try:
+        if target.stat().st_size > SNIFF_LIMIT:
+            return False
+        source = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+
+    try:
+        compile(source, str(target), "exec")
+    except (SyntaxError, ValueError):
+        return False
+
+    return True
+
+
 def command(target: Path) -> list[str]:
     """How to run ``target`` in its own process; empty when it cannot be run."""
-    if target.suffix == ".py":
+    if is_python(target):
         # -u keeps output unbuffered, so it appears as the program writes it.
         return [sys.executable, "-u", str(target)]
 
@@ -47,7 +71,7 @@ def command(target: Path) -> list[str]:
 
 def debug_command(target: Path) -> list[str]:
     """How to run ``target`` under the live tracer; empty when that is not possible."""
-    if target.suffix != ".py":
+    if not is_python(target):
         return []
 
     return [sys.executable, "-u", str(LIVE), str(target)]

@@ -56,9 +56,11 @@ class Watcher(threading.Thread):
     running program alone, exactly as if nothing had happened.
     """
 
-    def __init__(self, folder: Path, channel: Channel) -> None:
+    def __init__(self, script: Path, channel: Channel) -> None:
         super().__init__(daemon=True)
-        self.folder = folder
+        # The script itself is watched even when it is not called *.py.
+        self.script = script
+        self.folder = script.parent
         self.channel = channel
         self.reload = False
         self.stopped = False
@@ -73,13 +75,18 @@ class Watcher(threading.Thread):
                 if name not in SKIP_DIRS and not name.startswith(".")
             ]
             for name in names:
-                if not name.endswith(".py"):
-                    continue
                 path = Path(root) / name
+                if not name.endswith(".py") and path != self.script:
+                    continue
                 try:
                     found[path] = path.stat().st_mtime
                 except OSError:
                     continue
+
+        try:
+            found[self.script] = self.script.stat().st_mtime
+        except OSError:
+            pass
         return found
 
     def run(self) -> None:
@@ -150,12 +157,11 @@ class Live:
 
     def wanted(self, filename: str) -> bool:
         """True for files of the project being debugged."""
-        if not filename.endswith(".py"):
-            return False
-
         path = Path(filename)
         if path == self.script:
             return True
+        if not filename.endswith(".py"):
+            return False
         return self.root in path.parents
 
     def trace(self, frame, event, arg):
@@ -245,7 +251,7 @@ def main() -> int:
     sys.path.insert(0, str(script.parent))
 
     channel = Channel()
-    watcher = Watcher(script.parent, channel)
+    watcher = Watcher(script, channel)
     watcher.start()
     live = Live(script, watcher, channel)
 
