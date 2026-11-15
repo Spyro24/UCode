@@ -132,6 +132,7 @@ class Console(QFrame):
         self._shell: QProcess | None = None
         self._shell_buffer = ""
         self._shell_busy = False
+        self._program: QProcess | None = None
         self._cwd = Path.cwd()
 
         self.setObjectName("console")
@@ -461,6 +462,73 @@ class Console(QFrame):
     def _shell_prompt(self) -> str:
         return f"{_short_path(self._cwd)} $ "
 
+    # -- programs ------------------------------------------------------
+    def run_program(
+        self, command: list[str], *, cwd: Path | None = None, title: str = ""
+    ) -> bool:
+        """Run a command here, in its own process, whatever mode the console is in.
+
+        Returns False when nothing was started, after saying why in the pane.
+        """
+        if not command:
+            return False
+
+        if (
+            self._program is not None
+            and self._program.state() is not QProcess.ProcessState.NotRunning
+        ):
+            self._append("a program is already running\n", muted=True)
+            return False
+
+        program = QProcess(self)
+        program.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        program.setWorkingDirectory(str(cwd or self._cwd))
+        program.readyReadStandardOutput.connect(self._read_program)
+        program.finished.connect(lambda code, _status: self._program_finished(code))
+        program.start(command[0], command[1:])
+
+        if not program.waitForStarted(3000):
+            self._append(f"could not start {command[0]}\n", error=True)
+            program.deleteLater()
+            return False
+
+        if title:
+            self._append(f"{title}\n", muted=True)
+        shown = " ".join(shlex.quote(part) for part in command)
+        self._append(f"$ {shown}\n")
+        self._program = program
+        return True
+
+    def _read_program(self) -> None:
+        if self._program is None:
+            return
+        chunk = bytes(self._program.readAllStandardOutput()).decode(errors="replace")
+        self._append(chunk)
+
+    def _program_finished(self, code: int) -> None:
+        if self._program is not None:
+            tail = bytes(self._program.readAllStandardOutput()).decode(errors="replace")
+            self._append(tail)
+            self._program.deleteLater()
+            self._program = None
+
+        if code:
+            self._append(f"[exit {code}]\n", error=True)
+        else:
+            self._append("[exit 0]\n", muted=True)
+
+    @property
+    def running(self) -> bool:
+        """True while a program started by the Run menu is still going."""
+        return (
+            self._program is not None
+            and self._program.state() is not QProcess.ProcessState.NotRunning
+        )
+
+    def notice(self, text: str, *, error: bool = False) -> None:
+        """Say something in the pane, without it looking like program output."""
+        self._append(f"{text}\n", muted=not error, error=error)
+
     # -- output --------------------------------------------------------
     def _append(self, text: str, *, muted: bool = False, error: bool = False) -> None:
         if not text:
@@ -486,8 +554,12 @@ class Console(QFrame):
             self._set_prompt(self._shell_prompt())
 
     def shutdown(self) -> None:
-        """Stop the shell so it does not outlive the window."""
+        """Stop the shell and any running program so they do not outlive the window."""
         self._stop_shell()
+        if self._program is not None:
+            program, self._program = self._program, None
+            program.kill()
+            program.waitForFinished(1000)
 
     def focusInEvent(self, event) -> None:
         super().focusInEvent(event)

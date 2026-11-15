@@ -13,6 +13,7 @@ from PySide6.QtGui import (
     QShowEvent,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
@@ -25,7 +26,7 @@ from PySide6.QtWidgets import (
 
 from typing import Callable
 
-from ucode.core import disasm, elf
+from ucode.core import disasm, elf, run
 from ucode.core.config import Config
 from ucode.core.graph import FileGraph, build_file_graph
 from ucode.core.modes import ViewMode
@@ -92,6 +93,16 @@ class MainWindow(QMainWindow):
         self.open_file_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
         self.open_file_action.triggered.connect(self.open_file)
         self.file_menu.addAction(self.open_file_action)
+
+        self.run_action = QAction("Run", self)
+        self.run_action.setShortcut(QKeySequence("Ctrl+R"))
+        self.run_action.triggered.connect(lambda: self.run_current())
+        self.run_menu.addAction(self.run_action)
+
+        self.debug_action = QAction("Debug (Live)", self)
+        self.debug_action.setShortcut(QKeySequence("F5"))
+        self.debug_action.triggered.connect(lambda: self.run_current(debug=True))
+        self.run_menu.addAction(self.debug_action)
 
         self.mode_group = QActionGroup(self)
         self.mode_group.setExclusive(True)
@@ -369,6 +380,72 @@ class MainWindow(QMainWindow):
         if canvas.graph is not None and not self._graph_framed:
             self._graph_framed = True
             canvas.frame_graph()
+
+    # -- running -------------------------------------------------------
+    def run_current(self, *, debug: bool = False) -> None:
+        """Run (or live-debug) the file in front of the user, in the console."""
+        self.work_area.canvas.save_editors()
+
+        console = self.work_area.console
+        target = self._run_target()
+        if target is None:
+            console.notice(
+                "nothing to run: open a file, or a project with main.py in it"
+            )
+            return
+
+        # The process runs in the file's folder, so it must get an absolute path.
+        target = target.resolve()
+        if not target.is_file():
+            console.notice(f"{target} does not exist", error=True)
+            return
+
+        if debug:
+            args = run.debug_command(target)
+            if not args:
+                console.notice(
+                    f"live debugging runs Python scripts; {target.name} is not one",
+                    error=True,
+                )
+                return
+            title = f"debug \u00b7 {target.name}"
+        else:
+            args = run.command(target)
+            if not args:
+                console.notice(
+                    f"{target.name} is neither a Python script nor an executable",
+                    error=True,
+                )
+                return
+            title = f"run \u00b7 {target.name}"
+
+        console.run_program(args, cwd=target.parent, title=title)
+
+    def _run_target(self) -> Path | None:
+        """The file the Run menu should execute."""
+        if self.file_path is not None:
+            return self.file_path
+
+        focused = self._focused_file()
+        if focused is not None:
+            return focused
+
+        return run.entry_point(self.folder)
+
+    def _focused_file(self) -> Path | None:
+        """The node whose editor has the keyboard focus, if one does."""
+        widget = QApplication.focusWidget()
+        while widget is not None:
+            path = getattr(widget, "path", None)
+            if isinstance(path, str) and path:
+                candidate = Path(path)
+                if not candidate.is_absolute() and self.folder is not None:
+                    candidate = self.folder / candidate
+                if candidate.is_file():
+                    return candidate
+            widget = widget.parentWidget()
+
+        return None
 
     def recompute_layout(self) -> None:
         """Throw away the hand-placed arrangement and lay the view out afresh."""
