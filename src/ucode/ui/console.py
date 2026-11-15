@@ -123,7 +123,8 @@ class Console(QFrame):
     live_line = Signal(str, int)
     live_error = Signal(str, int)
     live_reload = Signal()
-    live_hits = Signal(object)  # {file: [lines]} the session has run since the last message  # where the session died
+    live_hits = Signal(object)  # {file: [lines]} the session has run since the last message
+    live_vars = Signal(object)  # the variables of the frame the session is in  # where the session died
     live_idle = Signal()
     live_stopped = Signal()
 
@@ -525,6 +526,14 @@ class Console(QFrame):
         self._program_buffer = ""
         return True
 
+    def send_command(self, command: dict) -> bool:
+        """Talk to a live session on its stdin; False when nothing is listening."""
+        if self._program is None or not self._program_live:
+            return False
+
+        self._program.write((json.dumps(command) + "\n").encode())
+        return True
+
     def _read_program(self) -> None:
         if self._program is None:
             return
@@ -577,6 +586,14 @@ class Console(QFrame):
             self.live_error.emit(str(event.get("file", "")), int(event.get("line", 0)))
         elif kind == "hits":
             self.live_hits.emit(dict(event.get("files", {})))
+        elif kind == "vars":
+            self.live_vars.emit(dict(event))
+        elif kind == "set_error":
+            self._append(
+                f"\u2717 {event.get('name', '?')}: "
+                f"{event.get('message', 'not a Python value')}\n",
+                error=True,
+            )
         elif kind == "invalid":
             name = event.get("file", "?")
             line = event.get("line", 0)

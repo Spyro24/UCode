@@ -9,6 +9,8 @@ console strips out; everything else on stdout is the program's own output.
 
 from __future__ import annotations
 
+import ast
+import ctypes
 import importlib
 import json
 import linecache
@@ -20,6 +22,7 @@ import sysconfig
 import threading
 import time
 import traceback
+import types
 from pathlib import Path
 
 # Directories that never hold the code being debugged.
@@ -37,6 +40,9 @@ SKIP_DIRS = {
 POLL = 0.25
 FRAME = 1 / 60  # one display refresh: the window the executed marks describe
 HITS = FRAME / 2  # reported faster than the refresh, so every frame has something to show
+VARS = 0.2  # how often the variables are sent while running: a panel, not a firehose
+MAX_VALUE = 160  # a repr longer than this is cut: the panel is a sidebar
+MAX_ENTRIES = 80
 
 
 class Channel:
@@ -53,6 +59,18 @@ class Channel:
 
 class Reload(Exception):
     """Raised inside the running code to stop it for a reload."""
+
+
+def push_locals(frame) -> None:
+    """Make an edited ``f_locals`` dict the frame's real variables.
+
+    Up to 3.12 the dict is a copy of the fast variables, so writing it is not enough;
+    from 3.13 it writes through and there is nothing to do.
+    """
+    try:
+        ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(frame), ctypes.c_int(1))
+    except Exception:  # noqa: BLE001 - a newer interpreter needs no help here
+        pass
 
 
 class Watcher(threading.Thread):
@@ -148,6 +166,30 @@ class Watcher(threading.Thread):
         return self.reload
 
 
+class Control(threading.Thread):
+    """Commands from the window arrive on stdin, one JSON object per line."""
+
+    def __init__(self, live: "Live") -> None:
+        super().__init__(daemon=True)
+        self.live = live
+
+    def run(self) -> None:
+        stream = sys.stdin
+        if stream is None:
+            return
+
+        for line in stream:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                command = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(command, dict):
+                self.live.command(command)
+
+
 class Live:
     """A tracer that narrates the script's own code and stops it for a reload."""
 
@@ -168,6 +210,10 @@ class Live:
         # Lines run since the last message: sent in batches, not one event per line.
         self.pending: dict[str, set[int]] = {}
         self.flushed = 0.0
+        # Values the user typed in the variable panel, waiting for a line to apply to.
+        self.assignments: dict[str, object] = {}
+        self.assign_lock = threading.Lock()
+        self.sent_vars = 0.0
         # (error, file, line, locals) taken while the frames still held them: after the
         # stack unwinds Python clears the frames, so they cannot be read at report time.
         self.snapshots: list[tuple[BaseException, str, int, dict]] = []
@@ -209,6 +255,10 @@ class Live:
     def line(self, frame) -> None:
         self.lines += 1
 
+        if self.assignments:
+            self.apply(frame)
+        self.send_vars(frame)
+
         filename = frame.f_code.co_filename
         self.pending.setdefault(filename, set()).add(frame.f_lineno)
 
@@ -227,6 +277,118 @@ class Live:
         self.channel.send(
             event="line", file=position[0], line=position[1]
         )
+
+    def _entry(self, name: str, value, scope: str) -> dict | None:
+        """One variable, or None for the ones a panel should not list."""
+        if name.startswith("__") and name.endswith("__"):
+            return None
+        if isinstance(
+            value,
+            (types.ModuleType, types.FunctionType, types.BuiltinFunctionType, type),
+        ):
+            return None
+
+        try:
+            shown = repr(value)
+        except Exception:  # noqa: BLE001 - a broken __repr__ must not break the run
+            return None
+
+        editable = isinstance(
+            value,
+            (int, float, complex, bool, str, bytes, list, dict, tuple, set, frozenset),
+        ) or value is None
+        if len(shown) > MAX_VALUE:
+            shown = shown[:MAX_VALUE] + "\u2026"
+        return {"name": name, "value": shown, "scope": scope, "editable": editable}
+
+    def describe(self, frame) -> list[dict]:
+        """The variables of ``frame``, then the module's own."""
+        entries: list[dict] = []
+        seen: set[str] = set()
+
+        local = frame.f_locals
+        for name, value in local.items():
+            entry = self._entry(name, value, "local" if local is not frame.f_globals else "global")
+            if entry is not None:
+                entries.append(entry)
+            seen.add(name)
+
+        if local is not frame.f_globals:
+            for name, value in frame.f_globals.items():
+                if name in seen:
+                    continue
+                entry = self._entry(name, value, "global")
+                if entry is not None:
+                    entries.append(entry)
+
+        return entries[:MAX_ENTRIES]
+
+    def send_vars(self, frame, *, force: bool = False) -> None:
+        """Send the panel what the session holds, a few times a second."""
+        now = time.monotonic()
+        if not force and now - self.sent_vars < VARS:
+            return
+        self.sent_vars = now
+        self.channel.send(
+            event="vars",
+            file=frame.f_code.co_filename,
+            line=frame.f_lineno,
+            function=frame.f_code.co_name,
+            entries=self.describe(frame),
+        )
+
+    @staticmethod
+    def _namespace(frame, name: str):
+        """The frame and namespace that hold ``name``, or the module's globals."""
+        current = frame
+        for _ in range(40):
+            if current is None:
+                break
+            local = current.f_locals
+            if name in local:
+                return current, local
+            current = current.f_back
+        return frame, frame.f_globals
+
+    def apply(self, frame) -> None:
+        """Write the values the user typed into the variables that hold them."""
+        with self.assign_lock:
+            if not self.assignments:
+                return
+            pending, self.assignments = self.assignments, {}
+
+        changed = False
+        for name, value in pending.items():
+            owner, namespace = self._namespace(frame, name)
+            try:
+                namespace[name] = value
+            except (TypeError, ValueError):
+                continue
+
+            if namespace is not owner.f_globals:
+                push_locals(owner)
+            changed = True
+
+        if changed:
+            self.send_vars(frame, force=True)
+
+    def command(self, command: dict) -> None:
+        """A message from the window: for now, a variable to set."""
+        if command.get("cmd") != "set":
+            return
+
+        name = str(command.get("name", ""))
+        text = str(command.get("value", ""))
+        try:
+            value = ast.literal_eval(text)
+        except (ValueError, SyntaxError, TypeError):
+            self.channel.send(
+                event="set_error", name=name, message="not a Python value"
+            )
+            return
+
+        with self.assign_lock:
+            self.assignments[name] = value
 
     def flush_hits(self) -> None:
         """Tell the window which new lines have run, so every file shows its path."""
@@ -387,6 +549,7 @@ def main() -> int:
     watcher = Watcher(script, channel, root)
     watcher.start()
     live = Live(script, watcher, channel, root)
+    Control(live).start()
 
     status = 0
     while True:
@@ -396,6 +559,9 @@ def main() -> int:
 
         # Every run starts from the files on disk, as a fresh `python script.py` would.
         forget_project_modules(root, system)
+        with live.assign_lock:
+            live.assignments.clear()
+        live.sent_vars = 0.0
 
         sys.settrace(live.trace)
         try:

@@ -176,9 +176,12 @@ class MainWindow(QMainWindow):
         self.work_area.console.live_line.connect(self._show_live_line)
         self.work_area.console.live_error.connect(self._show_live_error)
         self.work_area.console.live_hits.connect(self._show_live_hits)
+        self.work_area.console.live_vars.connect(self._show_live_vars)
+        self.side_panel.variables.edited.connect(self._set_live_variable)
         self.work_area.console.live_idle.connect(self._clear_live_line)
         self.work_area.console.live_reload.connect(self._clear_live_marks)
         self.work_area.console.live_stopped.connect(self._clear_live_marks)
+        self.work_area.console.live_stopped.connect(self._clear_live_vars)
         self.work_area.canvas.node_moved.connect(self._remember_positions)
         self.work_area.canvas.folder_moved.connect(self._remember_positions)
 
@@ -473,6 +476,9 @@ class MainWindow(QMainWindow):
             # A fresh session: the previous run's marks no longer apply.
             self.work_area.canvas.set_error_line(None, None)
             self.work_area.canvas.clear_executed_lines()
+            # The variables of the run are part of watching it, so the panel opens.
+            self.side_panel.variables.clear(f"waiting for {target.name}")
+            self.open_side_panel()
 
         console.run_program(args, cwd=target.parent, title=title, live=debug)
 
@@ -509,11 +515,33 @@ class MainWindow(QMainWindow):
         """Nothing is executing any more; a failure mark stays until the next run."""
         self.work_area.canvas.set_active_line(None, None)
 
+    def _show_live_vars(self, data: dict) -> None:
+        """Fill the side panel with what the paused-at line of the session holds."""
+        path = str(data.get("file", ""))
+        key = self._node_key(path) or Path(path).name
+        line = int(data.get("line", 0) or 0)
+        function = str(data.get("function", ""))
+        place = "module level" if function == "<module>" else (f"{function}()" if function else "")
+        where = f"{key}:{line}" + (f" \u00b7 {place}" if place else "")
+        self.side_panel.variables.set_entries(list(data.get("entries", [])), where)
+
+    def _set_live_variable(self, name: str, value: str) -> None:
+        """Apply a value the user typed, in the running program."""
+        sent = self.work_area.console.send_command(
+            {"cmd": "set", "name": name, "value": value}
+        )
+        if not sent:
+            self.side_panel.variables.show_text("no live session to change")
+
     def _clear_live_marks(self) -> None:
         """New code is about to run: nothing executed so far describes it any more."""
         self._clear_live_line()
         self.work_area.canvas.set_error_line(None, None)
         self.work_area.canvas.clear_executed_lines()
+
+    def _clear_live_vars(self) -> None:
+        """The session is gone: the panel stops describing a frame."""
+        self.side_panel.variables.clear("session ended")
 
     def _node_key(self, path: str) -> str | None:
         """The graph key for a file path, when the file is a node in this view."""

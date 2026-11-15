@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QFrame, QVBoxLayout, QWidget
 
 from ucode.core.tile import TILE
 from ucode.ui.theme import BG_PANEL, BORDER
+from ucode.ui.variables import VariablesPanel
 
 
 class SidePanel(QFrame):
@@ -32,3 +33,7 @@ class SidePanel(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
+        # The live debugger's variables live here; the panel is empty otherwise.
+        self.variables = VariablesPanel(self)
+        layout.addWidget(self.variables)
