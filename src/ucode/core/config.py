@@ -66,6 +66,18 @@ def _parse_positions(value: object) -> dict[str, dict[str, tuple[float, float]]]
     return positions
 
 
+def _parse_runs(value: object) -> dict[str, str]:
+    """The file chosen to run, per project: ``{project: path}``."""
+    if not isinstance(value, dict):
+        return {}
+
+    runs: dict[str, str] = {}
+    for project, path in value.items():
+        if isinstance(project, str) and isinstance(path, str) and path.strip():
+            runs[project] = path
+    return runs
+
+
 def _parse_mode(value: object) -> ViewMode:
     if isinstance(value, str):
         try:
@@ -85,6 +97,8 @@ class Config:
     positions: dict[str, dict[str, tuple[float, float]]] = field(default_factory=dict)
     # The same for the folder boxes, which can be dragged independently.
     folders: dict[str, dict[str, tuple[float, float]]] = field(default_factory=dict)
+    # The file the user picked to run, per project, when no main.py was found.
+    runs: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -103,6 +117,7 @@ class Config:
             project=_parse_project(raw.get("project")),
             positions=_parse_positions(raw.get("positions")),
             folders=_parse_positions(raw.get("folders")),
+            runs=_parse_runs(raw.get("runs")),
         )
 
     def save(self, path: Path | None = None) -> None:
@@ -113,6 +128,8 @@ class Config:
         data: dict[str, object] = {"mode": self.mode.value}
         if self.project:
             data["project"] = self.project
+        if self.runs:
+            data["runs"] = dict(self.runs)
         for key, mapping in (("positions", self.positions), ("folders", self.folders)):
             if not mapping:
                 continue

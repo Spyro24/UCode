@@ -392,10 +392,10 @@ class MainWindow(QMainWindow):
         console = self.work_area.console
         target = self._run_target()
         if target is None:
-            console.notice(
-                "nothing to run: open a file, or a project with main.py in it"
-            )
-            return
+            # No main.py, nothing in focus: let the user point at the file to run.
+            target = self._choose_run_target()
+            if target is None:
+                return
 
         # The process runs in the file's folder, so it must get an absolute path.
         target = target.resolve()
@@ -464,7 +464,56 @@ class MainWindow(QMainWindow):
         if focused is not None:
             return focused
 
+        remembered = self._remembered_run_target()
+        if remembered is not None:
+            return remembered
+
         return run.entry_point(self.folder)
+
+    def _run_key(self) -> str | None:
+        """What the chosen run target is remembered under."""
+        if self.file_path is not None:
+            return str(self.file_path)
+        if self.folder is not None:
+            return str(self.folder)
+        return None
+
+    def _remembered_run_target(self) -> Path | None:
+        """The file chosen last time for this project, while it still exists."""
+        key = self._run_key()
+        if key is None:
+            return None
+
+        stored = self.config.runs.get(key)
+        if not stored:
+            return None
+
+        path = Path(stored)
+        return path if path.is_file() else None
+
+    def _choose_run_target(self) -> Path | None:
+        """Ask which file to run, and remember it for this project."""
+        start = str(self.folder) if self.folder is not None else str(Path.home())
+        chosen, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Select the file to run",
+            start,
+            "Python files (*.py);;All files (*)",
+        )
+
+        if not chosen:
+            self.work_area.console.notice(
+                "no file was chosen, so nothing was run", error=False
+            )
+            return None
+
+        path = Path(chosen).resolve()
+        key = self._run_key()
+        if key is not None:
+            self.config.runs[key] = str(path)
+            self._save_config()
+
+        return path
 
     def _focused_file(self) -> Path | None:
         """The node whose editor has the keyboard focus, if one does."""
