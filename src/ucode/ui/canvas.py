@@ -140,6 +140,29 @@ class Canvas(QWidget):
         self._sync_editors()
         self.update()
 
+    def focus_node(self, path: str) -> bool:
+        """Bring one node to the middle of the view and give its editor the keyboard."""
+        node = self._nodes.get(path)
+        if node is None:
+            return False
+
+        # Code is only readable at 1:1, so a jump never leaves the view zoomed out.
+        self.viewport.zoom = max(MIN_FRAME_ZOOM, self.viewport.zoom)
+        zoom = self.viewport.zoom
+        centre_x = (node.tile[0] + node.size[0] / 2) * TILE
+        centre_y = (node.tile[1] + node.size[1] / 2) * TILE
+
+        # The camera holds the world point at its top-left corner.
+        self.viewport.left = centre_x - self.width() / 2 / zoom
+        self.viewport.top = centre_y - self.height() / 2 / zoom
+        self._sync_editors()
+        self.update()
+
+        editor = self._editors.get(path)
+        if editor is not None:
+            editor.setFocus(Qt.FocusReason.OtherFocusReason)
+        return True
+
     def set_active_line(self, path: str | None, line: int | None = None) -> None:
         """Mark the line a live session is executing, and the node that holds it."""
         if path == self._active_path and line == self._active_line:

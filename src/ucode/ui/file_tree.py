@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QDir
+from PySide6.QtCore import QDir, Signal
 from PySide6.QtWidgets import (
     QFileSystemModel,
     QFrame,
@@ -26,6 +26,9 @@ class FileTree(QFrame):
 
     DEFAULT_TILES = 4
     WIDTH = DEFAULT_TILES * TILE
+
+    # A file was double-clicked in the tree: the Path that was hit.
+    file_activated = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -57,6 +60,8 @@ class FileTree(QFrame):
         for column in (1, 2, 3):
             self.view.setColumnHidden(column, True)
 
+        self.view.doubleClicked.connect(self._activate)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -67,3 +72,13 @@ class FileTree(QFrame):
         root = str(path)
         self.model.setRootPath(root)
         self.view.setRootIndex(self.model.index(root))
+
+    def _activate(self, index) -> None:
+        """Double-click: a folder opens itself, a file goes to the workspace."""
+        if self.model.isDir(index):
+            self.view.setExpanded(index, not self.view.isExpanded(index))
+            return
+
+        path = self.model.filePath(index)
+        if path:
+            self.file_activated.emit(Path(path))

@@ -172,6 +172,7 @@ class MainWindow(QMainWindow):
         self.panel_toggle.button.clicked.connect(self.toggle_side_panel)
         self.work_area.empty_state.folder_requested.connect(self.open_folder)
         self.side_bar.files_toggled.connect(self.toggle_file_tree)
+        self.file_tree.file_activated.connect(self.open_path)
         self.work_area.console.live_line.connect(self._show_live_line)
         self.work_area.console.live_idle.connect(self._clear_live_line)
         self.work_area.console.live_stopped.connect(self._clear_live_line)
@@ -383,6 +384,24 @@ class MainWindow(QMainWindow):
         if canvas.graph is not None and not self._graph_framed:
             self._graph_framed = True
             canvas.frame_graph()
+
+    def open_path(self, path: Path) -> None:
+        """Show a file picked in the selector: jump to its node, or open it alone."""
+        path = Path(path).resolve()
+
+        if self.folder is not None and self.file_path is not None:
+            # A lone file was on the canvas: the project is the view to return to.
+            self.set_folder(self.folder)
+
+        key = self._node_key(str(path))
+        if key is not None:
+            # The canvas only holds nodes in the node view, so get there first.
+            self.set_mode(ViewMode.NODE_FILES)
+            if self.work_area.canvas.focus_node(key):
+                return
+
+        # Not part of the open project: show the file on its own.
+        self.load_file(path)
 
     # -- running -------------------------------------------------------
     def run_current(self, *, debug: bool = False) -> None:
