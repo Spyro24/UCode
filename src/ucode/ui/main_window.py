@@ -394,6 +394,12 @@ class MainWindow(QMainWindow):
             self.set_folder(self.folder)
 
         key = self._node_key(str(path))
+        if key is None and self.folder is not None:
+            # The graph was built when the project opened: a file made since then is
+            # not a node yet, so look again once the project has been re-read.
+            self._rebuild_project_graph()
+            key = self._node_key(str(path))
+
         if key is not None:
             # The canvas only holds nodes in the node view, so get there first.
             self.set_mode(ViewMode.NODE_FILES)
@@ -402,6 +408,18 @@ class MainWindow(QMainWindow):
 
         # Not part of the open project: show the file on its own.
         self.load_file(path)
+
+    def _rebuild_project_graph(self) -> None:
+        """Re-read the project, keeping the node positions the user chose."""
+        if self.folder is None:
+            return
+
+        self.graph = build_file_graph(self.folder)
+        key = self._view_key()
+        self.graph.apply_positions(self.config.positions.get(key, {}))
+        self.graph.apply_folder_positions(self.config.folders.get(key, {}))
+        self._graph_framed = False
+        self._sync_graph()
 
     # -- running -------------------------------------------------------
     def run_current(self, *, debug: bool = False) -> None:
