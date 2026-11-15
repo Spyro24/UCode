@@ -176,6 +176,7 @@ class MainWindow(QMainWindow):
         self.work_area.console.live_line.connect(self._show_live_line)
         self.work_area.console.live_error.connect(self._show_live_error)
         self.work_area.console.live_idle.connect(self._clear_live_line)
+        self.work_area.console.live_reload.connect(self._clear_live_marks)
         self.work_area.console.live_stopped.connect(self._clear_live_marks)
         self.work_area.canvas.node_moved.connect(self._remember_positions)
         self.work_area.canvas.folder_moved.connect(self._remember_positions)

@@ -217,8 +217,35 @@ class Live:
             event="line", file=position[0], line=position[1]
         )
 
+    def report_syntax(self, error: SyntaxError) -> None:
+        """Report a file that will not compile.
+
+        The traceback only holds the import that pulled the file in — the line at
+        fault is in the broken file itself, which never ran, so it is named here.
+        """
+        message = error.msg or "invalid syntax"
+        print(f"!! {type(error).__name__}: {message}", flush=True)
+
+        filename = error.filename or ""
+        line = error.lineno or 0
+        name = Path(filename).name if filename else "<unknown>"
+        print(f"   at {name}:{line}", flush=True)
+
+        text = (error.text or "").strip()
+        if text:
+            print(f"     {text}", flush=True)
+            if error.offset:
+                print("     " + " " * (error.offset - 1) + "^", flush=True)
+
+        if filename and Path(filename).is_file():
+            self.channel.send(event="error", file=filename, line=line)
+
     def report(self, error: BaseException) -> None:
         """Say where it broke and what the variables held there."""
+        if isinstance(error, SyntaxError):
+            self.report_syntax(error)
+            return
+
         print(f"!! {type(error).__name__}: {error}", flush=True)
 
         frames = [
