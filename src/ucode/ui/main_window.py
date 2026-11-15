@@ -301,6 +301,7 @@ class MainWindow(QMainWindow):
 
         self.file_path = path
         self._view_factory = factory
+        self.work_area.console.set_project(path.parent)
         self.work_area.show_canvas()
         self.set_mode(ViewMode.NODE_FILES, persist=False)
         self._show_graph(graph)
@@ -330,6 +331,7 @@ class MainWindow(QMainWindow):
         self.file_path = None
         self._view_factory = None
         self.setWindowTitle("UCode")
+        self.work_area.console.set_project(path)
         self.file_tree.set_root(path)
         self.file_tree.show()
         self.side_bar.folder_button.setChecked(True)
@@ -425,6 +427,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         """Flush any node edits still sitting in an editor."""
         self.work_area.canvas.save_editors()
+        self.work_area.console.shutdown()
         super().closeEvent(event)
 
     # -- side panel ----------------------------------------------------

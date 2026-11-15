@@ -54,6 +54,7 @@ SYNTAX_PREPROCESSOR = "#56b6c2"
 TEXT = "#d7dce5"
 TEXT_MUTED = "#8b93a1"
 ACCENT = "#4c8dff"
+CONSOLE_ERROR = "#e06c75"  # tracebacks and failed commands
 
 
 def build_palette() -> QPalette:
