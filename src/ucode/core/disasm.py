@@ -43,12 +43,65 @@ ARCHITECTURES: tuple[tuple[str, str, int], ...] = (
     ("RISC-V 64", "riscv:rv64", 243),
 )
 
-_HEADER = re.compile(r"^([0-9a-fA-F]+) <([^>]+)>:\s*$")
+# llvm-objdump names the same machines differently from GNU objdump's -m.
+LLVM_ARCH = {
+    "i386:x86-64": "x86-64",
+    "i386": "i386",
+    "arm": "arm",
+    "aarch64": "aarch64",
+    "mips": "mips",
+    "powerpc": "powerpc",
+    "riscv:rv32": "riscv32",
+    "riscv:rv64": "riscv64",
+}
+
+LLVM_NAMES = (
+    "llvm-objdump",
+    "llvm-objdump-20",
+    "llvm-objdump-19",
+    "llvm-objdump-18",
+    "llvm-objdump-17",
+    "llvm-objdump-16",
+    "llvm-objdump-15",
+)
+
+_HEADER = re.compile(r"^\s*([0-9a-fA-F]+) <([^>]+)>:\s*$")
 _INSN = re.compile(r"^\s*([0-9a-fA-F]+):\s+(.+?)\s*$")
 # objdump -l puts "source.c:12" (sometimes with a discriminator) on its own line.
 _LOCATION = re.compile(r"^(\S.*?):(\d+)(?:\s+\(discriminator\s+\d+\))?\s*$")
 _TARGET = re.compile(r"<([^>+]+)")
-_FLOW = re.compile(r"^(callq?|jmpq?|j[a-z]{1,3})\b")
+
+# Branch instructions, per family: x86 conditional jumps, ARM/AArch64 bl/b.cond,
+# MIPS/RISC-V jal, PowerPC bctr. A call or branch to a known function is an edge.
+_FLOW_OPS = {
+    "call", "callq", "jmp", "jmpq", "bl", "blr", "blx", "b", "br", "bx",
+    "bal", "jal", "jalr", "jalx", "j", "jr", "jsr", "bc", "bcl", "bclr",
+    "bctr", "cbz", "cbnz", "tbz", "tbnz",
+}
+_CONDITIONS = {
+    "eq", "ne", "lt", "le", "gt", "ge", "hs", "hi", "lo", "ls", "mi",
+    "pl", "vs", "vc", "cs", "cc", "al", "nz", "z",
+}
+
+_RELOC_HEAD = re.compile(r"RELOCATION RECORDS FOR \[(?P<section>[^\]]+)\]")
+_RELOC_ROW = re.compile(r"^([0-9a-fA-F]+)\s+(R_\S+)\s+(.+?)\s*$")
+_CODE_SECTIONS = (".text", ".plt", ".init", ".fini", ".plt.sec")
+
+
+def _is_flow(asm: str) -> bool:
+    """True when an instruction can lead to another function."""
+    head = asm.split(None, 1)
+    if not head:
+        return False
+
+    op = head[0].lower()
+    if op in _FLOW_OPS:
+        return True
+    if op.startswith("j") and op[1:].isalpha() and len(op) <= 5:  # je, jne, jg, jle
+        return True
+    if op.startswith("b."):  # AArch64 conditional branch
+        return True
+    return op.startswith("b") and op[1:] in _CONDITIONS  # beq, bne, blt, bge
 
 
 SOURCE_WIDTH = 72  # characters of the source line shown before it is cut
@@ -77,21 +130,66 @@ class Function:
 
 
 def available() -> bool:
-    """True when objdump can be run."""
-    return shutil.which("objdump") is not None
+    """True when some disassembler can be run."""
+    return shutil.which("objdump") is not None or llvm_objdump() is not None
 
 
-def run_objdump(path: Path, machine: str | None = None, timeout: float = 20.0) -> str:
-    """The disassembly text for ``path``, or "" when objdump cannot provide it.
+def llvm_objdump() -> str | None:
+    """llvm-objdump, which can read every architecture LLVM supports.
+
+    GNU objdump is built for one target: on an x86 host it prints a header and no
+    instructions for an aarch64 binary, which looks exactly like an empty file.
+    """
+    for name in LLVM_NAMES:
+        found = shutil.which(name)
+        if found:
+            return found
+
+    for candidate in sorted(
+        Path("/usr/lib").glob("llvm-*/bin/llvm-objdump"), reverse=True
+    ):
+        if candidate.is_file():
+            return str(candidate)
+
+    return None
+
+
+def _commands(path: Path, machine: str | None) -> list[tuple[str, list[str]]]:
+    """The disassemblers to try, in order, with their arguments."""
+    commands: list[tuple[str, list[str]]] = []
+    target = ["-m", machine] if machine else []
+
+    if shutil.which("objdump"):
+        commands.append(
+            (
+                "objdump",
+                ["objdump", "-d", "-l", "--no-show-raw-insn", *target, str(path)],
+            )
+        )
+
+    llvm = llvm_objdump()
+    if llvm:
+        arch = [f"--arch-name={LLVM_ARCH[machine]}"] if machine in LLVM_ARCH else []
+        commands.append(
+            (
+                "llvm-objdump",
+                [llvm, "-d", "-l", "--no-show-raw-insn", *arch, str(path)],
+            )
+        )
+
+    return commands
+
+
+def run_objdump(
+    path: Path, machine: str | None = None, timeout: float = 20.0
+) -> tuple[str, str]:
+    """Disassembly text for ``path`` and the tool that produced it.
 
     ``-l`` adds the DWARF line table when the binary has one and prints nothing when it
-    does not, so asking for it always is harmless.
+    does not, so asking for it always is harmless. A run that prints no instruction is
+    not accepted: GNU objdump happily prints a header for a foreign architecture.
     """
-    target = ["-m", machine] if machine else []
-    for args in (
-        ["objdump", "-d", "-l", "--no-show-raw-insn", *target, str(path)],
-        ["objdump", "-d", "-l", *target, str(path)],
-    ):
+    for name, args in _commands(path, machine):
         try:
             done = subprocess.run(
                 args,
@@ -104,10 +202,12 @@ def run_objdump(path: Path, machine: str | None = None, timeout: float = 20.0) -
         except (OSError, subprocess.SubprocessError):
             continue
 
-        if done.returncode == 0 and done.stdout.strip():
-            return done.stdout
+        if done.returncode != 0 or not done.stdout.strip():
+            continue
+        if any(_INSN.match(raw) for raw in done.stdout.splitlines()):
+            return done.stdout, name
 
-    return ""
+    return "", ""
 
 
 def parse(text: str) -> list[Function]:
@@ -118,6 +218,16 @@ def parse(text: str) -> list[Function]:
     number = 0
 
     for raw in text.splitlines():
+        # llvm-objdump marks its own notes — source lines, function names — with ';'.
+        body = raw.strip()
+        if body.startswith(";"):
+            body = body[1:].strip()
+            location = _LOCATION.match(body)
+            if location is not None:
+                source = location.group(1)
+                number = int(location.group(2))
+            continue
+
         location = _LOCATION.match(raw)
         if location is not None and not _INSN.match(raw):
             source = location.group(1)
@@ -140,9 +250,11 @@ def parse(text: str) -> list[Function]:
         if instruction is None:
             continue
 
+        # llvm-objdump separates mnemonics with tabs; one spacing for both tools.
+        mnemonic = " ".join(instruction.group(2).split())
         found = Instruction(
             address=int(instruction.group(1), 16),
-            asm=instruction.group(2),
+            asm=mnemonic,
             source=source if number else "",
             line=number,
         )
@@ -154,20 +266,107 @@ def parse(text: str) -> list[Function]:
     return [function for function in functions if function.instructions]
 
 
-def _link(functions: list[Function]) -> None:
+def run_relocations(
+    path: Path, machine: str | None = None, timeout: float = 20.0
+) -> dict[int, str]:
+    """Instruction address -> the symbol a call there relocates to.
+
+    An object file calls through an unresolved offset, so the operand alone cannot say
+    which function is reached; the relocation table can.
+    """
+    commands: list[list[str]] = []
+    llvm = llvm_objdump()
+    if llvm:
+        commands.append([llvm, "-r", str(path)])
+    if shutil.which("objdump"):
+        commands.append(["objdump", "-r", str(path)])
+
+    for args in commands:
+        try:
+            done = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+
+        if done.returncode != 0 or _RELOC_HEAD.search(done.stdout) is None:
+            continue
+
+        return _parse_relocations(done.stdout)
+
+    return {}
+
+
+def _parse_relocations(text: str) -> dict[int, str]:
+    """Read the relocation records of the code sections."""
+    found: dict[int, str] = {}
+    in_code = False
+
+    for raw in text.splitlines():
+        header = _RELOC_HEAD.search(raw)
+        if header is not None:
+            section = header.group("section")
+            in_code = section == ".text" or section.startswith(_CODE_SECTIONS)
+            continue
+
+        if not in_code:
+            continue
+
+        row = _RELOC_ROW.match(raw.strip())
+        if row is None:
+            continue
+
+        value = row.group(3).split()[-1]  # GNU prints an offset before the name
+        for separator in ("+", "-"):
+            head, _sep, tail = value.partition(separator)
+            if tail.startswith("0x"):
+                value = head
+                break
+
+        found[int(row.group(1), 16)] = value
+
+    return found
+
+
+def _link(functions: list[Function], relocations: dict[int, str]) -> None:
     """Record which function each call or jump instruction reaches."""
     known = {function.name for function in functions}
 
     for function in functions:
         seen: set[str] = set()
+        addresses = [instruction.address for instruction in function.instructions]
+
         for index, instruction in enumerate(function.instructions):
-            asm = instruction.asm
-            if not _FLOW.match(asm):
+            if not _is_flow(instruction.asm):
                 continue
-            target = _TARGET.search(asm)
-            if target is None or target.group(1) not in known:
+
+            # A relocation names the callee in unlinked code; a linked binary has the
+            # symbol in the operand itself. The relocation points at the operand field,
+            # which on x86 sits one byte past the opcode, so look inside the instruction.
+            end = (
+                addresses[index + 1]
+                if index + 1 < len(addresses)
+                else instruction.address + 8
+            )
+            name = next(
+                (
+                    relocations[offset]
+                    for offset in range(instruction.address, end)
+                    if offset in relocations
+                ),
+                "",
+            )
+            if not name:
+                target = _TARGET.search(instruction.asm)
+                name = target.group(1) if target is not None else ""
+
+            if not name or name not in known:
                 continue
-            name = target.group(1)
             if name == function.name or name in seen:
                 continue  # one edge per callee, at the first place it is reached
             seen.add(name)
@@ -278,24 +477,34 @@ def build_graph(
     if not available():
         return None, "objdump is not installed (binutils), so there is nothing to disassemble."
 
-    text = run_objdump(path, machine)
+    text, tool = run_objdump(path, machine)
     if not text:
+        tools = "objdump and llvm-objdump" if llvm_objdump() else "objdump"
         if machine:
             name = next(
                 (label for label, target, _ in ARCHITECTURES if target == machine),
                 machine,
             )
-            return None, f"objdump could not disassemble {path.name} as {name}."
-        return None, f"objdump could not read {path.name}."
+            detail = f" as {name}"
+        else:
+            detail = ""
+
+        hint = ""
+        if llvm_objdump() is None:
+            hint = (
+                " GNU objdump only reads the architecture it was built for;"
+                " install llvm for the others."
+            )
+        return None, f"{tools} could not disassemble {path.name}{detail}.{hint}"
 
     functions = parse(text)
     if not functions:
-        return None, f"{path.name} has no machine code objdump can show."
+        return None, f"{path.name} has no machine code {tool} can show."
 
     functions.sort(key=lambda function: function.address)
     truncated = len(functions) > MAX_FUNCTIONS
     functions = functions[:MAX_FUNCTIONS]
-    _link(functions)
+    _link(functions, run_relocations(path, machine))
 
     has_lines = any(
         instruction.line
@@ -417,6 +626,8 @@ def build_graph(
         graph.synthetic[node_paths[function.name]] = (bodies[function.name], "readonly")
 
     note = f"{len(functions)} functions"
+    if tool and tool != "objdump":
+        note += f" · {tool}"
     shown = len([label for label in groups if label])
     if has_lines and shown:
         detail = "DWARF + source" if sources else "DWARF line info"
