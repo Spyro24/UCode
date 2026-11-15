@@ -69,9 +69,21 @@ def command(target: Path) -> list[str]:
     return []
 
 
-def debug_command(target: Path) -> list[str]:
-    """How to run ``target`` under the live tracer; empty when that is not possible."""
+def debug_command(target: Path, root: Path | None = None) -> list[str]:
+    """How to run ``target`` under the live tracer; empty when that is not possible.
+
+    ``root`` is the project the files belong to: modules imported from another folder
+    inside it must reload too, not just the ones beside the script.
+    """
     if not is_python(target):
         return []
 
-    return [sys.executable, "-u", str(LIVE), str(target)]
+    command = [sys.executable, "-u", str(LIVE), str(target)]
+    if root is not None:
+        # The tracer starts in the script's folder, so a relative root would resolve
+        # against the wrong place: it has to be absolute before it is handed over.
+        try:
+            command += ["--root", str(root.resolve())]
+        except OSError:
+            pass
+    return command

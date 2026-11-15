@@ -449,7 +449,7 @@ class MainWindow(QMainWindow):
             return
 
         if debug:
-            args = run.debug_command(target)
+            args = run.debug_command(target, self.folder)
             if not args:
                 console.notice(
                     f"live debugging runs Python code; {target.name} is not Python",

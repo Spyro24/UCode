@@ -14,7 +14,9 @@ import json
 import linecache
 import os
 import runpy
+import site
 import sys
+import sysconfig
 import threading
 import time
 import traceback
@@ -58,11 +60,13 @@ class Watcher(threading.Thread):
     running program alone, exactly as if nothing had happened.
     """
 
-    def __init__(self, script: Path, channel: Channel) -> None:
+    def __init__(self, script: Path, channel: Channel, root: Path | None = None) -> None:
         super().__init__(daemon=True)
         # The script itself is watched even when it is not called *.py.
         self.script = script
-        self.folder = script.parent
+        # Everything the project holds is watched, not only the script's own folder:
+        # a module in a sibling folder is code the user is editing too.
+        self.folder = root or script.parent
         self.channel = channel
         self.reload = False
         self.stopped = False
@@ -145,9 +149,15 @@ class Watcher(threading.Thread):
 class Live:
     """A tracer that narrates the script's own code and stops it for a reload."""
 
-    def __init__(self, script: Path, watcher: Watcher, channel: Channel) -> None:
+    def __init__(
+        self,
+        script: Path,
+        watcher: Watcher,
+        channel: Channel,
+        root: Path | None = None,
+    ) -> None:
         self.script = script
-        self.root = script.parent
+        self.root = root or script.parent
         self.watcher = watcher
         self.channel = channel
         self.lines = 0
@@ -238,12 +248,38 @@ class Live:
             print(f"   locals: {pairs}", flush=True)
 
 
-def forget_project_modules(root: Path) -> None:
+def system_folders() -> tuple[Path, ...]:
+    """Where the standard library and installed packages live: never the user's code."""
+    folders: list[Path] = []
+    for entry in sysconfig.get_paths().values():
+        folders.append(Path(entry))
+    try:
+        folders.extend(Path(entry) for entry in site.getsitepackages())
+    except AttributeError:  # pragma: no cover - a trimmed interpreter
+        pass
+    try:
+        folders.append(Path(site.getusersitepackages()))
+    except AttributeError:  # pragma: no cover
+        pass
+
+    resolved: list[Path] = []
+    for folder in folders:
+        try:
+            resolved.append(folder.resolve())
+        except OSError:
+            continue
+    return tuple(resolved)
+
+
+def forget_project_modules(root: Path, system: tuple[Path, ...]) -> None:
     """Drop the project's modules so the next run imports them from disk again.
 
     Python caches imports for the life of the process; without this, editing a module
     and reloading would keep running the code from the previous import, while a plain
-    `python script.py` would have read the edited file.
+    `python script.py` would have read the edited file. A module counts as the user's
+    when it lives in the project, or anywhere on the path that is not an installed
+    library — a module reached through a folder the script added to ``sys.path`` still
+    has to be re-read.
     """
     for name, module in list(sys.modules.items()):
         if name in ("__main__", "__mp_main__"):
@@ -260,29 +296,49 @@ def forget_project_modules(root: Path) -> None:
 
         if root in path.parents or path.parent == root:
             del sys.modules[name]
+            continue
+
+        if any(folder == path.parent or folder in path.parents for folder in system):
+            continue
+
+        del sys.modules[name]
 
     linecache.clearcache()
     importlib.invalidate_caches()
 
 
 def main() -> int:
-    if len(sys.argv) < 2:
+    arguments = list(sys.argv[1:])
+    root: Path | None = None
+    if "--root" in arguments:
+        index = arguments.index("--root")
+        if index + 1 < len(arguments):
+            root = Path(arguments[index + 1]).resolve()
+            del arguments[index : index + 2]
+        else:
+            del arguments[index:]
+
+    if not arguments:
         print("usage: live.py script.py [args...]", file=sys.stderr)
         return 2
 
-    script = Path(sys.argv[1]).resolve()
+    script = Path(arguments[0]).resolve()
     if not script.is_file():
         print(f"live.py: {script} not found", file=sys.stderr)
         return 2
 
-    arguments = sys.argv[2:]
+    if root is None or not root.is_dir():
+        root = script.parent
+
+    arguments = arguments[1:]
     sys.argv = [str(script), *arguments]
     sys.path.insert(0, str(script.parent))
+    system = system_folders()
 
     channel = Channel()
-    watcher = Watcher(script, channel)
+    watcher = Watcher(script, channel, root)
     watcher.start()
-    live = Live(script, watcher, channel)
+    live = Live(script, watcher, channel, root)
 
     status = 0
     while True:
@@ -291,7 +347,7 @@ def main() -> int:
         status = 0
 
         # Every run starts from the files on disk, as a fresh `python script.py` would.
-        forget_project_modules(script.parent)
+        forget_project_modules(root, system)
 
         sys.settrace(live.trace)
         try:
