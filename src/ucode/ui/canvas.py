@@ -38,6 +38,7 @@ from ucode.core.tile import TILE
 from ucode.core.viewport import MIN_ZOOM, Viewport
 from ucode.ui.node_editor import NodeEditor
 from ucode.ui.theme import (
+    ACCENT,
     BG_SURFACE,
     GRAPH_ARROW,
     GRAPH_EDGE,
@@ -89,6 +90,9 @@ class Canvas(QWidget):
         self.graph: FileGraph | None = None
         self._nodes: dict = {}
         self._editors: dict[str, NodeEditor] = {}
+        # The file and line a live session is executing, drawn on the node itself.
+        self._active_path: str | None = None
+        self._active_line: int | None = None
         self._drag_origin: QPointF | None = None
         self._frame_pending = False
 
@@ -121,6 +125,8 @@ class Canvas(QWidget):
     def set_graph(self, graph: FileGraph | None) -> None:
         """Show ``graph``, or an empty surface when it is None."""
         self._clear_editors()
+        self._active_path = None
+        self._active_line = None
         self.graph = graph
         self._nodes = graph.by_path() if graph is not None else {}
         self._drag_node = None
@@ -132,6 +138,24 @@ class Canvas(QWidget):
         self._drag_folder_members = []
         self._rebuild_routes()
         self._sync_editors()
+        self.update()
+
+    def set_active_line(self, path: str | None, line: int | None = None) -> None:
+        """Mark the line a live session is executing, and the node that holds it."""
+        if path == self._active_path and line == self._active_line:
+            return
+
+        previous = self._editors.get(self._active_path) if self._active_path else None
+        if previous is not None:
+            previous.set_active_line(None)
+
+        self._active_path = path
+        self._active_line = line
+
+        editor = self._editors.get(path) if path else None
+        if editor is not None and line:
+            editor.set_active_line(line)
+
         self.update()
 
     def save_editors(self) -> None:
@@ -893,7 +917,8 @@ class Canvas(QWidget):
 
             width = max(1, int(round(rect.width())))
             height = max(1, int(round(rect.height())))
-            key = ("node", node.path, round(zoom, 4), width, height)
+            active = node.path == self._active_path
+            key = ("node", node.path, round(zoom, 4), width, height, active)
             painter.drawPixmap(
                 int(rect.left()),
                 int(rect.top()),
@@ -901,11 +926,19 @@ class Canvas(QWidget):
                     key,
                     width,
                     height,
-                    self._node_layer(node, zoom, width, height, header),
+                    self._node_layer(node, zoom, width, height, header, active),
                 ),
             )
 
-    def _node_layer(self, node, zoom: float, width: int, height: int, header: float):
+    def _node_layer(
+        self,
+        node,
+        zoom: float,
+        width: int,
+        height: int,
+        header: float,
+        active: bool = False,
+    ):
         """How one node's frame is drawn, at its own size."""
 
         def draw(layer: QPainter) -> None:
@@ -936,6 +969,12 @@ class Canvas(QWidget):
             layer.setPen(QPen(QColor(GRAPH_NODE_BORDER), 1))
             layer.setBrush(QColor(GRAPH_NODE))
             layer.drawRoundedRect(rect, 6, 6)
+
+            if active:
+                # The file a live session is running: framed so it reads at a glance.
+                layer.setPen(QPen(QColor(ACCENT), max(1.4, 1.8 * zoom)))
+                layer.setBrush(Qt.BrushStyle.NoBrush)
+                layer.drawRoundedRect(rect.adjusted(0.7, 0.7, -0.7, -0.7), 6, 6)
 
             if zoom >= LABEL_MIN_ZOOM:
                 font = self._font(9)

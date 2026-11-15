@@ -172,6 +172,9 @@ class MainWindow(QMainWindow):
         self.panel_toggle.button.clicked.connect(self.toggle_side_panel)
         self.work_area.empty_state.folder_requested.connect(self.open_folder)
         self.side_bar.files_toggled.connect(self.toggle_file_tree)
+        self.work_area.console.live_line.connect(self._show_live_line)
+        self.work_area.console.live_idle.connect(self._clear_live_line)
+        self.work_area.console.live_stopped.connect(self._clear_live_line)
         self.work_area.canvas.node_moved.connect(self._remember_positions)
         self.work_area.canvas.folder_moved.connect(self._remember_positions)
 
@@ -419,7 +422,38 @@ class MainWindow(QMainWindow):
                 return
             title = f"run \u00b7 {target.name}"
 
-        console.run_program(args, cwd=target.parent, title=title)
+        console.run_program(args, cwd=target.parent, title=title, live=debug)
+
+    def _show_live_line(self, path: str, line: int) -> None:
+        """Mark the line the live session is on, inside the node that holds the file."""
+        key = self._node_key(path)
+        if key is not None:
+            self.work_area.canvas.set_active_line(key, line)
+
+    def _clear_live_line(self) -> None:
+        """The session moved on or ended: no line is being executed any more."""
+        self.work_area.canvas.set_active_line(None, None)
+
+    def _node_key(self, path: str) -> str | None:
+        """The graph key for a file path, when the file is a node in this view."""
+        if not path or self.graph is None:
+            return None
+
+        nodes = self.graph.by_path()
+        if path in nodes:
+            return path
+
+        root = self.graph.root
+        if root is None:
+            return None
+
+        try:
+            relative = Path(path).resolve().relative_to(root.resolve())
+        except (ValueError, OSError):
+            return None
+
+        key = relative.as_posix()
+        return key if key in nodes else None
 
     def _run_target(self) -> Path | None:
         """The file the Run menu should execute."""

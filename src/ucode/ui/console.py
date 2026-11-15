@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import codeop
+import json
 import re
 import shlex
 import sys
@@ -11,7 +12,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from enum import Enum
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, Qt
+from PySide6.QtCore import QProcess, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QKeyEvent, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QFrame,
@@ -37,6 +38,9 @@ from ucode.ui.theme import (
 # with which working directory. Letter-boxes nobody prints by accident.
 _MARKER = re.compile("\x01UCODE(\\d+)\\|(.*?)\x01", re.DOTALL)
 _DONE = "printf '\\001UCODE%s|%s\\001' $? \"$PWD\"\n"
+
+# A live session reports control events in the same stream as its output.
+_EVENT = re.compile("\x01UCODE(\\{.*?\\})\x01", re.DOTALL)
 
 def _short_path(path: Path | None) -> str:
     """A path as the prompt is willing to show it: home collapsed."""
@@ -115,6 +119,11 @@ class Console(QFrame):
     keeps a single bash alive, so `cd` and variables survive between commands.
     """
 
+    # A live session's current position, and the end of a run or of the session.
+    live_line = Signal(str, int)
+    live_idle = Signal()
+    live_stopped = Signal()
+
     DEFAULT_TILES = 3
     HEIGHT = DEFAULT_TILES * TILE
 
@@ -133,6 +142,9 @@ class Console(QFrame):
         self._shell_buffer = ""
         self._shell_busy = False
         self._program: QProcess | None = None
+        self._program_buffer = ""
+        self._program_live = False
+        self._program_idle = False
         self._cwd = Path.cwd()
 
         self.setObjectName("console")
@@ -213,6 +225,8 @@ class Console(QFrame):
         font.setPixelSize(13)
         self._output.setFont(font)
         self._output.document().setDefaultFont(font)
+        # A long live trace must not turn the document into a millstone.
+        self._output.setMaximumBlockCount(5000)
 
         self._layout.addWidget(self._output, 1)
 
@@ -464,21 +478,26 @@ class Console(QFrame):
 
     # -- programs ------------------------------------------------------
     def run_program(
-        self, command: list[str], *, cwd: Path | None = None, title: str = ""
+        self,
+        command: list[str],
+        *,
+        cwd: Path | None = None,
+        title: str = "",
+        live: bool = False,
     ) -> bool:
         """Run a command here, in its own process, whatever mode the console is in.
 
-        Returns False when nothing was started, after saying why in the pane.
+        A live session holds a watcher open after the program ends, so it is replaced
+        rather than refused when something else is asked for.
         """
         if not command:
             return False
 
-        if (
-            self._program is not None
-            and self._program.state() is not QProcess.ProcessState.NotRunning
-        ):
-            self._append("a program is already running\n", muted=True)
-            return False
+        if self._program is not None:
+            if self.running and not (live or self._program_live):
+                self._append("a program is already running\n", muted=True)
+                return False
+            self._stop_program(stop_line="replaced")
 
         program = QProcess(self)
         program.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
@@ -497,21 +516,95 @@ class Console(QFrame):
         shown = " ".join(shlex.quote(part) for part in command)
         self._append(f"$ {shown}\n")
         self._program = program
+        self._program_live = live
+        self._program_idle = False
+        self._program_buffer = ""
         return True
 
     def _read_program(self) -> None:
         if self._program is None:
             return
         chunk = bytes(self._program.readAllStandardOutput()).decode(errors="replace")
-        self._append(chunk)
+        self._program_buffer += chunk
+        self._drain_program_buffer()
+
+    def _drain_program_buffer(self) -> None:
+        """Show the output, and keep the control events for the rest of the window."""
+        while True:
+            start = self._program_buffer.find("\x01")
+            if start < 0:
+                if self._program_buffer:
+                    self._append(self._program_buffer)
+                    self._program_buffer = ""
+                return
+
+            if start > 0:
+                self._append(self._program_buffer[:start])
+                self._program_buffer = self._program_buffer[start:]
+
+            match = _EVENT.match(self._program_buffer)
+            if match is None:
+                # A marker split between two reads, or an escape the program printed.
+                if len(self._program_buffer) > 8192:
+                    self._append(self._program_buffer)
+                    self._program_buffer = ""
+                return
+
+            self._program_buffer = self._program_buffer[match.end() :]
+            try:
+                event = json.loads(match.group(1))
+            except ValueError:
+                continue
+            self._live_event(event)
+
+    def _live_event(self, event: dict) -> None:
+        kind = event.get("event")
+        if kind != "idle":
+            self._program_idle = False
+
+        if kind == "line":
+            self.live_line.emit(str(event.get("file", "")), int(event.get("line", 0)))
+        elif kind == "reload":
+            names = ", ".join(str(name) for name in event.get("files", []))
+            self._append(f"\u21bb reloaded {names}\n", muted=True)
+        elif kind == "invalid":
+            name = event.get("file", "?")
+            line = event.get("line", 0)
+            message = event.get("message", "invalid syntax")
+            self._append(
+                f"\u2717 {name}:{line} {message} \u2014 still running the old code\n",
+                error=True,
+            )
+        elif kind == "idle":
+            if event.get("reloaded"):
+                return  # the edit is about to run again: not the end of anything
+            self._program_idle = True
+            self._append("[finished \u00b7 edit a file to run it again]\n", muted=True)
+            self.live_idle.emit()
+
+    def _stop_program(self, *, stop_line: str = "stopped") -> None:
+        """End the running program (a live session keeps running otherwise)."""
+        if self._program is None:
+            return
+
+        program, self._program = self._program, None
+        program.kill()
+        program.waitForFinished(1000)
+        self._program_live = False
+        self._program_idle = False
+        program.deleteLater()
+        self._append(f"[{stop_line}]\n", muted=True)
+        self.live_stopped.emit()
 
     def _program_finished(self, code: int) -> None:
         if self._program is not None:
-            tail = bytes(self._program.readAllStandardOutput()).decode(errors="replace")
-            self._append(tail)
+            self._drain_program_buffer()
             self._program.deleteLater()
             self._program = None
 
+        self._program_live = False
+        self._program_idle = False
+        self.live_stopped.emit()
         if code:
             self._append(f"[exit {code}]\n", error=True)
         else:
@@ -519,9 +612,10 @@ class Console(QFrame):
 
     @property
     def running(self) -> bool:
-        """True while a program started by the Run menu is still going."""
+        """True while a program is actually going (a parked live session is not)."""
         return (
             self._program is not None
+            and not self._program_idle
             and self._program.state() is not QProcess.ProcessState.NotRunning
         )
 
@@ -556,10 +650,7 @@ class Console(QFrame):
     def shutdown(self) -> None:
         """Stop the shell and any running program so they do not outlive the window."""
         self._stop_shell()
-        if self._program is not None:
-            program, self._program = self._program, None
-            program.kill()
-            program.waitForFinished(1000)
+        self._stop_program(stop_line="stopped")
 
     def focusInEvent(self, event) -> None:
         super().focusInEvent(event)

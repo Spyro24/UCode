@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QSize, Qt, Signal
+from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFocusEvent,
@@ -12,12 +12,20 @@ from PySide6.QtGui import (
     QFontMetricsF,
     QPainter,
     QPaintEvent,
+    QTextCursor,
+    QTextFormat,
 )
-from PySide6.QtWidgets import QFrame, QPlainTextEdit, QWidget
+from PySide6.QtWidgets import QFrame, QPlainTextEdit, QTextEdit, QWidget
 
 from ucode.core.elf import parse_hex_dump
 from ucode.ui.highlighters import highlighter_for
-from ucode.ui.theme import BG_NODE_EDITOR, GUTTER_BG, GUTTER_TEXT, TEXT
+from ucode.ui.theme import (
+    ACTIVE_LINE,
+    BG_NODE_EDITOR,
+    GUTTER_BG,
+    GUTTER_TEXT,
+    TEXT,
+)
 
 SELECTION = "#3b5480"
 
@@ -117,6 +125,13 @@ class NodeEditor(QPlainTextEdit):
         self.document().setModified(False)
         # Editing changes how much room the text needs, so the fit has to be redone.
         self.document().contentsChanged.connect(self._mark_content_changed)
+
+        # Write the edit back shortly after typing stops: a live session watches the
+        # file, so its code has to reach disk without waiting for a focus change.
+        self._autosave = QTimer(self)
+        self._autosave.setSingleShot(True)
+        self._autosave.setInterval(400)
+        self._autosave.timeout.connect(self.save)
 
     # -- gutter --------------------------------------------------------
     def gutter_width(self) -> int:
@@ -260,7 +275,27 @@ class NodeEditor(QPlainTextEdit):
         """Forget the measurements and the fit; they are redone on the next sync."""
         self._content_dirty = True
         self._fitted = None
+        if self.mode == "source":
+            self._autosave.start()
         self.content_changed.emit()
+
+    def set_active_line(self, line: int | None) -> None:
+        """Mark the line a live session is executing, or take the mark away."""
+        if line is None:
+            self.setExtraSelections([])
+            return
+
+        block = self.document().findBlockByNumber(max(0, line - 1))
+        if not block.isValid():
+            return
+
+        selection = QTextEdit.ExtraSelection()
+        selection.format.setBackground(QColor(ACTIVE_LINE))
+        selection.format.setProperty(
+            QTextFormat.Property.FullWidthSelection, True
+        )
+        selection.cursor = QTextCursor(block)
+        self.setExtraSelections([selection])
 
     def save(self) -> None:
         if not self.document().isModified() or self.mode == "readonly":
