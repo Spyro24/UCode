@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
@@ -26,10 +27,14 @@ from ucode.ui.theme import (
     EXECUTED_LINE,
     GUTTER_BG,
     GUTTER_TEXT,
+    INLINE_VALUE_BG,
+    INLINE_VALUE_TEXT,
     TEXT,
 )
 
 SELECTION = "#3b5480"
+IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+VALUE_CHARS = 22  # a value shown inline is a glance, not a reader
 
 
 class _LineNumbers(QWidget):
@@ -139,6 +144,8 @@ class NodeEditor(QPlainTextEdit):
         self._active_line: int | None = None
         self._error_line: int | None = None
         self._executed: set[int] = set()
+        # What the variables on each line hold right now, drawn beside the code.
+        self._values: dict[str, str] = {}
 
     # -- gutter --------------------------------------------------------
     def gutter_width(self) -> int:
@@ -313,6 +320,91 @@ class NodeEditor(QPlainTextEdit):
             if selection is not None
         ]
         self.setExtraSelections(selections)
+
+    def set_values(self, values: dict[str, str]) -> None:
+        """Show these variables' values beside the lines that mention them."""
+        self._values = dict(values)
+        self.viewport().update()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        super().paintEvent(event)
+        if not self._values:
+            return
+
+        painter = QPainter(self.viewport())
+        painter.setFont(self.font())
+        metrics = painter.fontMetrics()
+        painter.setPen(QColor(INLINE_VALUE_TEXT))
+
+        block = self.firstVisibleBlock()
+        offset = self.contentOffset()
+        top = self.blockBoundingGeometry(block).translated(offset).top()
+        bottom = top + self.blockBoundingRect(block).height()
+        limit = event.rect().bottom()
+        viewport_width = self.viewport().width()
+
+        while block.isValid() and top <= limit:
+            if block.isVisible() and bottom >= event.rect().top():
+                text = block.text()
+                shown = [
+                    f"{name} = {self._values[name]}"
+                    for name in dict.fromkeys(IDENTIFIER.findall(text))
+                    if name in self._values
+                ]
+                if shown:
+                    self._paint_values(
+                        painter, metrics, block, shown, top, bottom, viewport_width
+                    )
+
+            block = block.next()
+            top = bottom
+            bottom = top + self.blockBoundingRect(block).height()
+
+        painter.end()
+
+    def _paint_values(
+        self,
+        painter: QPainter,
+        metrics,
+        block,
+        shown: list[str],
+        top: float,
+        bottom: float,
+        viewport_width: int,
+    ) -> None:
+        """Draw the values just after the line's text, tall enough to read."""
+        cursor = QTextCursor(block)
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        text_right = self.cursorRect(cursor).right()
+
+        # The value goes after the code, never over it: a line with no room gets none.
+        x = text_right + 6
+        room = viewport_width - 2 - x
+        if room < metrics.horizontalAdvance("value") * 2:
+            return
+
+        label = ", ".join(shown)
+        if len(label) > VALUE_CHARS:
+            label = label[: VALUE_CHARS - 1] + "\u2026"
+        if metrics.horizontalAdvance(label) + 10 > room:
+            label = metrics.elidedText(
+                label, Qt.TextElideMode.ElideRight, int(room) - 10
+            )
+
+        width = metrics.horizontalAdvance(label) + 10
+        height = metrics.height() + 2
+        y = top + max(0, (bottom - top - height) / 2)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(INLINE_VALUE_BG))
+        painter.drawRoundedRect(QRect(int(x), int(y), int(width), int(height)), 3, 3)
+
+        painter.setPen(QColor(INLINE_VALUE_TEXT))
+        painter.drawText(
+            QRect(int(x), int(y), int(width), int(height)),
+            Qt.AlignmentFlag.AlignCenter,
+            label,
+        )
 
     def _mark(self, line: int | None, colour: str) -> QTextEdit.ExtraSelection | None:
         """A full-width band on one line, or None when there is no such line."""

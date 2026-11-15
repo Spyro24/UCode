@@ -476,6 +476,7 @@ class MainWindow(QMainWindow):
             # A fresh session: the previous run's marks no longer apply.
             self.work_area.canvas.set_error_line(None, None)
             self.work_area.canvas.clear_executed_lines()
+            self.work_area.canvas.clear_values()
             # The variables of the run are part of watching it, so the panel opens.
             self.side_panel.variables.clear(f"waiting for {target.name}")
             self.open_side_panel()
@@ -523,7 +524,18 @@ class MainWindow(QMainWindow):
         function = str(data.get("function", ""))
         place = "module level" if function == "<module>" else (f"{function}()" if function else "")
         where = f"{key}:{line}" + (f" \u00b7 {place}" if place else "")
-        self.side_panel.variables.set_entries(list(data.get("entries", [])), where)
+        entries = list(data.get("entries", []))
+        self.side_panel.variables.set_entries(entries, where)
+
+        # The same values, printed beside the code that uses them.
+        values = {
+            str(entry.get("name", "")): str(entry.get("value", ""))
+            for entry in entries
+            if entry.get("name") and "." not in str(entry["name"])
+        }
+        node = self._node_key(path)
+        if node is not None:
+            self.work_area.canvas.set_values(node, values)
 
     def _set_live_variable(self, name: str, value: str) -> None:
         """Apply a value the user typed, in the running program."""
@@ -538,10 +550,12 @@ class MainWindow(QMainWindow):
         self._clear_live_line()
         self.work_area.canvas.set_error_line(None, None)
         self.work_area.canvas.clear_executed_lines()
+        self.work_area.canvas.clear_values()
 
     def _clear_live_vars(self) -> None:
         """The session is gone: the panel stops describing a frame."""
         self.side_panel.variables.clear("session ended")
+        self.work_area.canvas.clear_values()
 
     def _node_key(self, path: str) -> str | None:
         """The graph key for a file path, when the file is a node in this view."""
