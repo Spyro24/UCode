@@ -23,6 +23,7 @@ from ucode.ui.theme import (
     ACTIVE_LINE,
     BG_NODE_EDITOR,
     ERROR_LINE,
+    EXECUTED_LINE,
     GUTTER_BG,
     GUTTER_TEXT,
     TEXT,
@@ -134,9 +135,10 @@ class NodeEditor(QPlainTextEdit):
         self._autosave.setInterval(400)
         self._autosave.timeout.connect(self.save)
 
-        # The live session's position and, when it dies, the line it died on.
+        # The live session's position, the lines it has run, and where it died.
         self._active_line: int | None = None
         self._error_line: int | None = None
+        self._executed: set[int] = set()
 
     # -- gutter --------------------------------------------------------
     def gutter_width(self) -> int:
@@ -294,29 +296,38 @@ class NodeEditor(QPlainTextEdit):
         self._error_line = line
         self._refresh_marks()
 
+    def set_executed_lines(self, lines) -> None:
+        """Mark every line the session has run here, so its path through the file shows."""
+        self._executed = {int(line) for line in lines if line}
+        self._refresh_marks()
+
     def _refresh_marks(self) -> None:
-        """Both marks can apply to one file, so they are drawn together."""
-        selections = []
-        for line, colour in (
-            (self._active_line, ACTIVE_LINE),
-            (self._error_line, ERROR_LINE),
-        ):
-            if not line:
-                continue
-
-            block = self.document().findBlockByNumber(max(0, line - 1))
-            if not block.isValid():
-                continue
-
-            selection = QTextEdit.ExtraSelection()
-            selection.format.setBackground(QColor(colour))
-            selection.format.setProperty(
-                QTextFormat.Property.FullWidthSelection, True
+        """All the live marks overlap, so they are drawn weakest first."""
+        selections = [
+            selection
+            for selection in (
+                *(self._mark(line, EXECUTED_LINE) for line in sorted(self._executed)),
+                self._mark(self._active_line, ACTIVE_LINE),
+                self._mark(self._error_line, ERROR_LINE),
             )
-            selection.cursor = QTextCursor(block)
-            selections.append(selection)
-
+            if selection is not None
+        ]
         self.setExtraSelections(selections)
+
+    def _mark(self, line: int | None, colour: str) -> QTextEdit.ExtraSelection | None:
+        """A full-width band on one line, or None when there is no such line."""
+        if not line:
+            return None
+
+        block = self.document().findBlockByNumber(max(0, line - 1))
+        if not block.isValid():
+            return None
+
+        selection = QTextEdit.ExtraSelection()
+        selection.format.setBackground(QColor(colour))
+        selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+        selection.cursor = QTextCursor(block)
+        return selection
 
     def save(self) -> None:
         if not self.document().isModified() or self.mode == "readonly":

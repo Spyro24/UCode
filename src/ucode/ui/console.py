@@ -122,7 +122,8 @@ class Console(QFrame):
     # A live session's current position, and the end of a run or of the session.
     live_line = Signal(str, int)
     live_error = Signal(str, int)
-    live_reload = Signal()  # where the session died
+    live_reload = Signal()
+    live_hits = Signal(object)  # {file: [lines]} the session has run since the last message  # where the session died
     live_idle = Signal()
     live_stopped = Signal()
 
@@ -574,6 +575,8 @@ class Console(QFrame):
             self.live_reload.emit()
         elif kind == "error":
             self.live_error.emit(str(event.get("file", "")), int(event.get("line", 0)))
+        elif kind == "hits":
+            self.live_hits.emit(dict(event.get("files", {})))
         elif kind == "invalid":
             name = event.get("file", "?")
             line = event.get("line", 0)

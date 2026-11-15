@@ -35,6 +35,7 @@ SKIP_DIRS = {
 }
 
 POLL = 0.25
+HITS = 0.25  # how often the lines run so far are sent, so the marks keep up
 
 
 class Channel:
@@ -163,6 +164,9 @@ class Live:
         self.lines = 0
         self.last: tuple[str, int] | None = None
         self.sent = 0.0
+        # Lines run since the last message: sent in batches, not one event per line.
+        self.pending: dict[str, set[int]] = {}
+        self.flushed = 0.0
         # (error, file, line, locals) taken while the frames still held them: after the
         # stack unwinds Python clears the frames, so they cannot be read at report time.
         self.snapshots: list[tuple[BaseException, str, int, dict]] = []
@@ -204,10 +208,16 @@ class Live:
     def line(self, frame) -> None:
         self.lines += 1
 
+        filename = frame.f_code.co_filename
+        self.pending.setdefault(filename, set()).add(frame.f_lineno)
+
+        now = time.monotonic()
+        if now - self.flushed >= HITS:
+            self.flush_hits()
+
         # A loop hits the same lines again and again: only a move is worth a message,
         # and only a handful per second: the mark is read by eye, not by a machine.
-        position = (frame.f_code.co_filename, frame.f_lineno)
-        now = time.monotonic()
+        position = (filename, frame.f_lineno)
         if position == self.last or now - self.sent < 0.08:
             return
         self.last = position
@@ -216,6 +226,16 @@ class Live:
         self.channel.send(
             event="line", file=position[0], line=position[1]
         )
+
+    def flush_hits(self) -> None:
+        """Tell the window which new lines have run, so every file shows its path."""
+        self.flushed = time.monotonic()
+        if not self.pending:
+            return
+
+        files = {path: sorted(lines) for path, lines in self.pending.items()}
+        self.pending.clear()
+        self.channel.send(event="hits", files=files)
 
     def report_syntax(self, error: SyntaxError) -> None:
         """Report a file that will not compile.
@@ -390,6 +410,7 @@ def main() -> int:
         finally:
             sys.settrace(None)
 
+        live.flush_hits()
         channel.send(
             event="idle", code=status, lines=live.lines, reloaded=interrupted
         )

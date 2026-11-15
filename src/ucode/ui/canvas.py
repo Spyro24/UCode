@@ -98,6 +98,8 @@ class Canvas(QWidget):
         # Where a live session failed, marked on the file in red.
         self._error_path: str | None = None
         self._error_line: int | None = None
+        # Every line the live session has run, per node: the path it took through the code.
+        self._executed: dict[str, set[int]] = {}
         self._drag_origin: QPointF | None = None
         self._frame_pending = False
 
@@ -135,6 +137,7 @@ class Canvas(QWidget):
         self._focus_path = None
         self._error_path = None
         self._error_line = None
+        self._executed = {}
         self.graph = graph
         self._nodes = graph.by_path() if graph is not None else {}
         self._drag_node = None
@@ -164,6 +167,36 @@ class Canvas(QWidget):
         if editor is not None and line:
             editor.set_error_line(line)
 
+        self.update()
+
+    def add_executed_lines(self, marks: dict[str, set[int]]) -> None:
+        """Add the lines a live session has just run, per node, to what is already shown."""
+        changed = False
+        for path, lines in marks.items():
+            known = self._executed.setdefault(path, set())
+            before = len(known)
+            known.update(lines)
+            if len(known) == before:
+                continue
+
+            editor = self._editors.get(path)
+            if editor is not None:
+                editor.set_executed_lines(known)
+            changed = True
+
+        if changed:
+            self.update()
+
+    def clear_executed_lines(self) -> None:
+        """A new run starts with a clean page: nothing has been executed yet."""
+        if not self._executed:
+            return
+
+        for path in self._executed:
+            editor = self._editors.get(path)
+            if editor is not None:
+                editor.set_executed_lines(())
+        self._executed = {}
         self.update()
 
     def focus_node(self, path: str) -> bool:
@@ -278,6 +311,10 @@ class Canvas(QWidget):
                     max(12, int(rect.height() - header) - 4),
                 )
             )
+            if node.path in self._executed:
+                # Errors and runs can land here before the node has been on screen.
+                editor.set_executed_lines(self._executed[node.path])
+
             # The node is the fixed size, so the text is fitted to it.
             editor.fit_text(
                 editor.width(), editor.height(), node.columns, node.rows

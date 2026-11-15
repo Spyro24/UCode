@@ -175,6 +175,7 @@ class MainWindow(QMainWindow):
         self.file_tree.file_activated.connect(self.open_path)
         self.work_area.console.live_line.connect(self._show_live_line)
         self.work_area.console.live_error.connect(self._show_live_error)
+        self.work_area.console.live_hits.connect(self._show_live_hits)
         self.work_area.console.live_idle.connect(self._clear_live_line)
         self.work_area.console.live_reload.connect(self._clear_live_marks)
         self.work_area.console.live_stopped.connect(self._clear_live_marks)
@@ -469,8 +470,9 @@ class MainWindow(QMainWindow):
             title = f"run \u00b7 {target.name}"
 
         if debug:
-            # A fresh session: the previous run's failure mark no longer applies.
+            # A fresh session: the previous run's marks no longer apply.
             self.work_area.canvas.set_error_line(None, None)
+            self.work_area.canvas.clear_executed_lines()
 
         console.run_program(args, cwd=target.parent, title=title, live=debug)
 
@@ -491,14 +493,27 @@ class MainWindow(QMainWindow):
             self._graph_framed = True
         self.work_area.canvas.set_error_line(key, line)
 
+    def _show_live_hits(self, files: dict) -> None:
+        """Mark every line the session has run, in every file it has been through."""
+        marks: dict[str, set[int]] = {}
+        for path, lines in files.items():
+            key = self._node_key(str(path))
+            if key is None or not lines:
+                continue
+            marks.setdefault(key, set()).update(int(line) for line in lines)
+
+        if marks:
+            self.work_area.canvas.add_executed_lines(marks)
+
     def _clear_live_line(self) -> None:
         """Nothing is executing any more; a failure mark stays until the next run."""
         self.work_area.canvas.set_active_line(None, None)
 
     def _clear_live_marks(self) -> None:
-        """The session ended: the position and the failure mark both go."""
+        """New code is about to run: nothing executed so far describes it any more."""
         self._clear_live_line()
         self.work_area.canvas.set_error_line(None, None)
+        self.work_area.canvas.clear_executed_lines()
 
     def _node_key(self, path: str) -> str | None:
         """The graph key for a file path, when the file is a node in this view."""
