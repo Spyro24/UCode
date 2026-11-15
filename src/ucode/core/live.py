@@ -9,7 +9,9 @@ console strips out; everything else on stdout is the program's own output.
 
 from __future__ import annotations
 
+import importlib
 import json
+import linecache
 import os
 import runpy
 import sys
@@ -236,6 +238,33 @@ class Live:
             print(f"   locals: {pairs}", flush=True)
 
 
+def forget_project_modules(root: Path) -> None:
+    """Drop the project's modules so the next run imports them from disk again.
+
+    Python caches imports for the life of the process; without this, editing a module
+    and reloading would keep running the code from the previous import, while a plain
+    `python script.py` would have read the edited file.
+    """
+    for name, module in list(sys.modules.items()):
+        if name in ("__main__", "__mp_main__"):
+            continue
+
+        filename = getattr(module, "__file__", None)
+        if not filename:
+            continue
+
+        try:
+            path = Path(filename).resolve()
+        except OSError:
+            continue
+
+        if root in path.parents or path.parent == root:
+            del sys.modules[name]
+
+    linecache.clearcache()
+    importlib.invalidate_caches()
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print("usage: live.py script.py [args...]", file=sys.stderr)
@@ -260,6 +289,9 @@ def main() -> int:
         channel.send(event="start")
         interrupted = False
         status = 0
+
+        # Every run starts from the files on disk, as a fresh `python script.py` would.
+        forget_project_modules(script.parent)
 
         sys.settrace(live.trace)
         try:

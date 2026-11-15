@@ -146,6 +146,7 @@ class Console(QFrame):
         self._program_buffer = ""
         self._program_live = False
         self._program_idle = False
+        self._stopping = False  # we killed it ourselves: no exit status to report
         self._cwd = Path.cwd()
 
         self.setObjectName("console")
@@ -582,7 +583,13 @@ class Console(QFrame):
             if event.get("reloaded"):
                 return  # the edit is about to run again: not the end of anything
             self._program_idle = True
-            self._append("[finished \u00b7 edit a file to run it again]\n", muted=True)
+            code = int(event.get("code", 0) or 0)
+            # Report the status the way python reports it, then stay open for edits.
+            self._append(
+                f"[exit {code} \u00b7 edit a file to run it again]\n",
+                muted=not code,
+                error=bool(code),
+            )
             self.live_idle.emit()
 
     def _stop_program(self, *, stop_line: str = "stopped") -> None:
@@ -591,8 +598,10 @@ class Console(QFrame):
             return
 
         program, self._program = self._program, None
+        self._stopping = True
         program.kill()
         program.waitForFinished(1000)
+        self._stopping = False
         self._program_live = False
         self._program_idle = False
         program.deleteLater()
@@ -600,6 +609,9 @@ class Console(QFrame):
         self.live_stopped.emit()
 
     def _program_finished(self, code: int) -> None:
+        if self._stopping:
+            return  # killed by us, and already reported as such
+
         if self._program is not None:
             self._drain_program_buffer()
             self._program.deleteLater()
