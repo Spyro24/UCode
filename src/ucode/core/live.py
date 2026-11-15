@@ -36,7 +36,7 @@ SKIP_DIRS = {
 
 POLL = 0.25
 FRAME = 1 / 60  # one display refresh: the window the executed marks describe
-HITS = FRAME  # lines are reported once per frame, so the marks follow the refresh
+HITS = FRAME / 2  # reported faster than the refresh, so every frame has something to show
 
 
 class Channel:
