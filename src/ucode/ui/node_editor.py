@@ -22,6 +22,7 @@ from ucode.ui.highlighters import highlighter_for
 from ucode.ui.theme import (
     ACTIVE_LINE,
     BG_NODE_EDITOR,
+    ERROR_LINE,
     GUTTER_BG,
     GUTTER_TEXT,
     TEXT,
@@ -132,6 +133,10 @@ class NodeEditor(QPlainTextEdit):
         self._autosave.setSingleShot(True)
         self._autosave.setInterval(400)
         self._autosave.timeout.connect(self.save)
+
+        # The live session's position and, when it dies, the line it died on.
+        self._active_line: int | None = None
+        self._error_line: int | None = None
 
     # -- gutter --------------------------------------------------------
     def gutter_width(self) -> int:
@@ -281,21 +286,37 @@ class NodeEditor(QPlainTextEdit):
 
     def set_active_line(self, line: int | None) -> None:
         """Mark the line a live session is executing, or take the mark away."""
-        if line is None:
-            self.setExtraSelections([])
-            return
+        self._active_line = line
+        self._refresh_marks()
 
-        block = self.document().findBlockByNumber(max(0, line - 1))
-        if not block.isValid():
-            return
+    def set_error_line(self, line: int | None) -> None:
+        """Mark the line a live session failed on, in red."""
+        self._error_line = line
+        self._refresh_marks()
 
-        selection = QTextEdit.ExtraSelection()
-        selection.format.setBackground(QColor(ACTIVE_LINE))
-        selection.format.setProperty(
-            QTextFormat.Property.FullWidthSelection, True
-        )
-        selection.cursor = QTextCursor(block)
-        self.setExtraSelections([selection])
+    def _refresh_marks(self) -> None:
+        """Both marks can apply to one file, so they are drawn together."""
+        selections = []
+        for line, colour in (
+            (self._active_line, ACTIVE_LINE),
+            (self._error_line, ERROR_LINE),
+        ):
+            if not line:
+                continue
+
+            block = self.document().findBlockByNumber(max(0, line - 1))
+            if not block.isValid():
+                continue
+
+            selection = QTextEdit.ExtraSelection()
+            selection.format.setBackground(QColor(colour))
+            selection.format.setProperty(
+                QTextFormat.Property.FullWidthSelection, True
+            )
+            selection.cursor = QTextCursor(block)
+            selections.append(selection)
+
+        self.setExtraSelections(selections)
 
     def save(self) -> None:
         if not self.document().isModified() or self.mode == "readonly":

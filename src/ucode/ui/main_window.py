@@ -174,8 +174,9 @@ class MainWindow(QMainWindow):
         self.side_bar.files_toggled.connect(self.toggle_file_tree)
         self.file_tree.file_activated.connect(self.open_path)
         self.work_area.console.live_line.connect(self._show_live_line)
+        self.work_area.console.live_error.connect(self._show_live_error)
         self.work_area.console.live_idle.connect(self._clear_live_line)
-        self.work_area.console.live_stopped.connect(self._clear_live_line)
+        self.work_area.console.live_stopped.connect(self._clear_live_marks)
         self.work_area.canvas.node_moved.connect(self._remember_positions)
         self.work_area.canvas.folder_moved.connect(self._remember_positions)
 
@@ -466,6 +467,10 @@ class MainWindow(QMainWindow):
                 return
             title = f"run \u00b7 {target.name}"
 
+        if debug:
+            # A fresh session: the previous run's failure mark no longer applies.
+            self.work_area.canvas.set_error_line(None, None)
+
         console.run_program(args, cwd=target.parent, title=title, live=debug)
 
     def _show_live_line(self, path: str, line: int) -> None:
@@ -474,9 +479,25 @@ class MainWindow(QMainWindow):
         if key is not None:
             self.work_area.canvas.set_active_line(key, line)
 
+    def _show_live_error(self, path: str, line: int) -> None:
+        """The session died: go to the file, and mark the line that raised."""
+        key = self._node_key(path)
+        if key is None:
+            return
+
+        self.set_mode(ViewMode.NODE_FILES)
+        if self.work_area.canvas.focus_node(key):
+            self._graph_framed = True
+        self.work_area.canvas.set_error_line(key, line)
+
     def _clear_live_line(self) -> None:
-        """The session moved on or ended: no line is being executed any more."""
+        """Nothing is executing any more; a failure mark stays until the next run."""
         self.work_area.canvas.set_active_line(None, None)
+
+    def _clear_live_marks(self) -> None:
+        """The session ended: the position and the failure mark both go."""
+        self._clear_live_line()
+        self.work_area.canvas.set_error_line(None, None)
 
     def _node_key(self, path: str) -> str | None:
         """The graph key for a file path, when the file is a node in this view."""

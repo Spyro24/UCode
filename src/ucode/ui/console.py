@@ -121,6 +121,7 @@ class Console(QFrame):
 
     # A live session's current position, and the end of a run or of the session.
     live_line = Signal(str, int)
+    live_error = Signal(str, int)  # where the session died
     live_idle = Signal()
     live_stopped = Signal()
 
@@ -567,6 +568,8 @@ class Console(QFrame):
         elif kind == "reload":
             names = ", ".join(str(name) for name in event.get("files", []))
             self._append(f"\u21bb reloaded {names}\n", muted=True)
+        elif kind == "error":
+            self.live_error.emit(str(event.get("file", "")), int(event.get("line", 0)))
         elif kind == "invalid":
             name = event.get("file", "?")
             line = event.get("line", 0)

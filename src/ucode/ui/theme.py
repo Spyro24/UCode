@@ -56,6 +56,7 @@ TEXT_MUTED = "#8b93a1"
 ACCENT = "#4c8dff"
 CONSOLE_ERROR = "#e06c75"  # tracebacks and failed commands
 ACTIVE_LINE = "#2d4b70"  # the line a live session is executing
+ERROR_LINE = "#6b2530"  # the line a live session died on
 
 
 def build_palette() -> QPalette:

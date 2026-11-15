@@ -95,6 +95,9 @@ class Canvas(QWidget):
         self._active_line: int | None = None
         # The node a jump landed on: framed so it is obvious where the view went.
         self._focus_path: str | None = None
+        # Where a live session failed, marked on the file in red.
+        self._error_path: str | None = None
+        self._error_line: int | None = None
         self._drag_origin: QPointF | None = None
         self._frame_pending = False
 
@@ -130,6 +133,8 @@ class Canvas(QWidget):
         self._active_path = None
         self._active_line = None
         self._focus_path = None
+        self._error_path = None
+        self._error_line = None
         self.graph = graph
         self._nodes = graph.by_path() if graph is not None else {}
         self._drag_node = None
@@ -141,6 +146,24 @@ class Canvas(QWidget):
         self._drag_folder_members = []
         self._rebuild_routes()
         self._sync_editors()
+        self.update()
+
+    def set_error_line(self, path: str | None, line: int | None = None) -> None:
+        """Mark the line a live session failed on, and clear the mark before it."""
+        if path == self._error_path and line == self._error_line:
+            return
+
+        previous = self._editors.get(self._error_path) if self._error_path else None
+        if previous is not None:
+            previous.set_error_line(None)
+
+        self._error_path = path
+        self._error_line = line
+
+        editor = self._editors.get(path) if path else None
+        if editor is not None and line:
+            editor.set_error_line(line)
+
         self.update()
 
     def focus_node(self, path: str) -> bool:
