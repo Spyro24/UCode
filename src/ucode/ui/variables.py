@@ -1,24 +1,28 @@
 """The variables panel: what the live session holds, and a place to change it.
 
-The panel is a list of rows, one per variable of the frame the session is in. Values are
-text boxes: typing a new Python value and pressing Enter applies it to the running
-program, so a number or a flag can be tried out without editing the code.
+Each row is a name and a small field on its right. A plain value — number, text, boolean,
+None — shows itself in that field; anything else shows only a pen, because its value is
+too big to sit in a sidebar. Clicking either one turns it into an edit box: type a Python
+value, press Enter, and the running program takes it. Escape leaves it alone.
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QScrollArea,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from ucode.ui.theme import (
+    BG_CONTROL,
+    BG_CONTROL_HOVER,
     BG_PANEL,
     BG_SURFACE,
     BORDER,
@@ -26,15 +30,22 @@ from ucode.ui.theme import (
     TEXT_MUTED,
 )
 
+PEN = "\u270e"  # shown instead of a value the field cannot hold
+FIELD_CHARS = 22  # a long value is elided: the panel is narrow
+
 
 class _Row(QFrame):
-    """One variable: its name, and its value in a box that can be edited."""
+    """One variable: its name, and a field that shows its value or opens for editing."""
+
+    edited = Signal(str, str)  # name, the text the user typed
 
     def __init__(self, scope: str, name: str, entry: dict, parent: QWidget) -> None:
         super().__init__(parent)
 
         self.scope = scope
         self.name = name
+        # A plain value shows itself; anything else only gets a pen.
+        self.plain = bool(entry.get("plain", entry.get("editable", True)))
         depth = int(entry.get("depth", 0) or 0)
         self.setStyleSheet(
             f"_Row {{ background-color: {BG_SURFACE}; border-radius: 3px; }}"
@@ -49,35 +60,81 @@ class _Row(QFrame):
         label.setMinimumWidth(max(24, 70 - depth * 12))
         label.setToolTip(f"{name} \u00b7 " + ("module level" if scope == "global" else "local"))
 
+        # The field: a value chip, or a pen when the value is not a plain one.
+        self.chip = QToolButton(self)
+        self.chip.setAutoRaise(True)
+        self.chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chip.setToolTip("click to edit this value")
+        self.chip.setStyleSheet(
+            f"QToolButton {{ color: {TEXT}; background-color: {BG_CONTROL};"
+            f" border: 1px solid {BORDER}; border-radius: 3px; padding: 1px 6px; }}"
+            f"QToolButton:hover {{ background-color: {BG_CONTROL_HOVER}; }}"
+        )
+        self.chip.clicked.connect(self._begin)
+
         self.editor = QLineEdit(self)
+        self.editor.hide()
         self.editor.setStyleSheet(
             f"QLineEdit {{ background-color: {BG_PANEL}; color: {TEXT};"
             f" border: 1px solid {BORDER}; border-radius: 3px; padding: 1px 4px; }}"
         )
-        self.editor.setReadOnly(not entry.get("editable", True))
-        if not entry.get("editable", True):
-            self.editor.setStyleSheet(
-                f"QLineEdit {{ background-color: {BG_PANEL}; color: {TEXT_MUTED};"
-                f" border: none; padding: 1px 4px; }}"
-            )
+        self.editor.editingFinished.connect(self._finish)
+        self.editor.installEventFilter(self)
 
-        layout.addWidget(label)
+        layout.addWidget(label, 1)
+        layout.addWidget(self.chip)
         layout.addWidget(self.editor, 1)
 
         self._value = str(entry.get("value", ""))
+        self._show_value()
+
+    # -- the field -----------------------------------------------------
+    def _show_value(self) -> None:
+        """Back to the chip, showing the value or the pen."""
+        self.editor.hide()
+        self.chip.show()
+
+        if not self.plain:
+            self.chip.setText(PEN)
+            self.chip.setToolTip(f"{self._value} \u2014 click to edit")
+            return
+
+        text = self._value
+        if len(text) > FIELD_CHARS:
+            text = text[: FIELD_CHARS - 1] + "\u2026"
+        self.chip.setText(text)
+        self.chip.setToolTip(self._value)
+
+    def _begin(self) -> None:
+        """Turn the field into an edit box holding the current value."""
+        self.chip.hide()
         self.editor.setText(self._value)
-        # Reading starts at the beginning: a long repr otherwise shows its tail.
-        self.editor.setCursorPosition(0)
+        self.editor.show()
+        self.editor.setFocus(Qt.FocusReason.MouseFocusReason)
+        self.editor.selectAll()
+
+    def _finish(self) -> None:
+        text = self.editor.text()
+        self._value = text
+        self._show_value()
+        self.edited.emit(self.name, text)
 
     def set_value(self, value: str) -> None:
-        """Follow the program, unless the user is typing in this very box."""
+        """Follow the program, unless the user is typing in this very field."""
+        if self.editor.isVisible():
+            return
         self._value = value
-        if not self.editor.hasFocus():
-            self.editor.setText(value)
-            self.editor.setCursorPosition(0)
+        self._show_value()
 
-    def value(self) -> str:
-        return self.editor.text()
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.editor and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Escape:
+                # Escape keeps the old value: hide without committing.
+                self.editor.blockSignals(True)
+                self._show_value()
+                self.editor.blockSignals(False)
+                return True
+        return super().eventFilter(watched, event)
 
 
 class VariablesPanel(QWidget):
@@ -98,12 +155,10 @@ class VariablesPanel(QWidget):
         title.setStyleSheet(f"color: {TEXT}; font-weight: 600; background: transparent;")
 
         self.where = QLabel("no session", self)
-        self.where.setStyleSheet(
-            f"color: {TEXT_MUTED}; background: transparent;"
-        )
+        self.where.setStyleSheet(f"color: {TEXT_MUTED}; background: transparent;")
         self.where.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
-        hint = QLabel("edit a value, press Enter to apply it to the run", self)
+        hint = QLabel("click a value, change it, press Enter", self)
         hint.setStyleSheet(f"color: {TEXT_MUTED}; background: transparent;")
         hint.setWordWrap(True)
 
@@ -150,9 +205,7 @@ class VariablesPanel(QWidget):
             row = self._rows.get(key)
             if row is None:
                 row = _Row(key[0], key[1], entry, self._body)
-                row.editor.editingFinished.connect(
-                    lambda name=key[1], field=row.editor: self._commit(name, field)
-                )
+                row.edited.connect(self.edited)
                 self._rows[key] = row
                 # Before the trailing stretch, so the rows stay top-aligned.
                 self._list.insertWidget(self._list.count() - 1, row)
@@ -169,6 +222,3 @@ class VariablesPanel(QWidget):
             row = self._rows.pop(key)
             row.setParent(None)
             row.deleteLater()
-
-    def _commit(self, name: str, field: QLineEdit) -> None:
-        self.edited.emit(name, field.text())

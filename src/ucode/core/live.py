@@ -311,10 +311,12 @@ class Live:
         except Exception:  # noqa: BLE001 - a broken __repr__ must not break the run
             return None
 
-        editable = isinstance(
-            value,
-            (int, float, complex, bool, str, bytes, list, dict, tuple, set, frozenset),
-        ) or value is None
+        # Plain values show themselves in the panel; the rest show a pen, because their
+        # value is a whole structure rather than a number or a word.
+        plain = isinstance(value, (int, float, complex, bool, str, bytes)) or value is None
+        editable = plain or isinstance(
+            value, (list, dict, tuple, set, frozenset)
+        )
         if len(shown) > MAX_VALUE:
             shown = shown[:MAX_VALUE] + "\u2026"
 
@@ -327,6 +329,7 @@ class Live:
             "scope": scope,
             "depth": depth,
             "editable": editable,
+            "plain": plain,
             "object": expandable,
         }
 
