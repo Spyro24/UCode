@@ -41,7 +41,40 @@ CHIP_GAP = 0.5  # tiles between import nodes, tighter than files
 EXTERN_FOLDER = "~extern"
 SYSTEM_LABEL = "system headers"  # group for <...> includes
 
-FILE_SUFFIXES = {".py", ".c", ".h"}
+# Source files of the languages this editor can show, plus the files that sit beside
+# code and get edited with it. Everything else (images, archives, databases) stays out.
+FILE_SUFFIXES = {
+    # Python and the C family
+    ".py", ".pyi", ".c", ".h", ".cc", ".cp", ".cpp", ".cxx", ".hpp", ".hh",
+    ".hxx", ".m", ".mm", ".s", ".S", ".asm",
+    # other languages
+    ".rs", ".go", ".java", ".kt", ".kts", ".js", ".jsx", ".mjs", ".cjs",
+    ".ts", ".tsx", ".rb", ".php", ".swift", ".cs", ".scala", ".lua", ".pl",
+    ".sh", ".bash", ".zsh", ".fish", ".sql", ".zig", ".nim", ".hs", ".ex",
+    ".exs", ".erl", ".clj", ".dart", ".r", ".jl",
+    # markup, styles and build files that belong to the code
+    ".html", ".htm", ".css", ".scss", ".sass", ".less", ".vue", ".svelte",
+    ".json", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".txt",
+    ".md", ".rst", ".cmake", ".mk", ".gradle", ".proto", ".glsl", ".vert",
+    ".frag",
+}
+
+# Code files with no suffix at all; matching every unknown file would pull in binaries.
+FILE_NAMES = {
+    "Makefile",
+    "makefile",
+    "GNUmakefile",
+    "Dockerfile",
+    "Containerfile",
+    "Gemfile",
+    "Rakefile",
+    "Procfile",
+    "Justfile",
+    "justfile",
+}
+
+# A node shows its text, so a multi-megabyte file is a wall, not something to edit.
+MAX_BYTES = 512 * 1024
 
 SUFFIXES = FILE_SUFFIXES
 SKIP_FOLDERS = {".git", ".venv", "__pycache__", "build", "dist", "node_modules", ".ucode"}
@@ -109,15 +142,48 @@ class FileGraph:
                 box.tile = tile
 
 
+def _looks_like_text(path: Path) -> bool:
+    """True for a suffix-less file that holds code or text rather than a binary."""
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(4096)
+    except OSError:
+        return False
+
+    if b"\x00" in head:
+        return False
+
+    try:
+        head.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+
+    return True
+
+
 def _scan(root: Path) -> list[Path]:
     found: list[Path] = []
 
     for path in root.rglob("*"):
-        if not path.is_file() or path.suffix not in SUFFIXES:
+        if not path.is_file():
             continue
+
         relative = path.relative_to(root)
         if any(part.startswith(".") or part in SKIP_FOLDERS for part in relative.parts):
             continue
+
+        known = path.suffix in SUFFIXES or path.name in FILE_NAMES
+        if not known:
+            # An unknown suffix is not code; a suffix-less file may well be a script.
+            if path.suffix or not _looks_like_text(path):
+                continue
+
+        try:
+            if path.stat().st_size > MAX_BYTES:
+                continue
+        except OSError:
+            continue
+
         found.append(path)
 
     return sorted(found)
