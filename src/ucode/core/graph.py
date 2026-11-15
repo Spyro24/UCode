@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -579,9 +580,37 @@ def _add_edge(
     edges.append(Edge(source, target, source_line, target_line, label, kind))
 
 
-def build_file_graph(root: Path) -> FileGraph:
-    """Scan ``root``, size every file, and lay the graph out by folder."""
+def build_file_graph(root: Path, extra: Iterable[Path] | None = None) -> FileGraph:
+    """Scan ``root``, size every file, and lay the graph out by folder.
+
+    ``extra`` adds files the scan would skip — one the user asked for by name, say a
+    file in an ignored folder — as long as they are text small enough to show.
+    """
     files = _scan(root)
+
+    if extra:
+        present = set(files)
+        for path in extra:
+            try:
+                relative = path.resolve().relative_to(root.resolve())
+            except (ValueError, OSError):
+                continue
+
+            candidate = root / relative
+            if candidate in present or not candidate.is_file():
+                continue
+            try:
+                if candidate.stat().st_size > MAX_BYTES:
+                    continue
+            except OSError:
+                continue
+            if not _looks_like_text(candidate):
+                continue
+
+            files.append(candidate)
+            present.add(candidate)
+
+        files.sort()
 
     files_by_folder: dict[str, list[tuple[str, int, int]]] = {}
     texts: dict[Path, str] = {}

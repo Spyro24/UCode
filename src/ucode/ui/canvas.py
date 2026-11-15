@@ -93,6 +93,8 @@ class Canvas(QWidget):
         # The file and line a live session is executing, drawn on the node itself.
         self._active_path: str | None = None
         self._active_line: int | None = None
+        # The node a jump landed on: framed so it is obvious where the view went.
+        self._focus_path: str | None = None
         self._drag_origin: QPointF | None = None
         self._frame_pending = False
 
@@ -127,6 +129,7 @@ class Canvas(QWidget):
         self._clear_editors()
         self._active_path = None
         self._active_line = None
+        self._focus_path = None
         self.graph = graph
         self._nodes = graph.by_path() if graph is not None else {}
         self._drag_node = None
@@ -155,6 +158,7 @@ class Canvas(QWidget):
         # The camera holds the world point at its top-left corner.
         self.viewport.left = centre_x - self.width() / 2 / zoom
         self.viewport.top = centre_y - self.height() / 2 / zoom
+        self._focus_path = path
         self._sync_editors()
         self.update()
 
@@ -940,7 +944,7 @@ class Canvas(QWidget):
 
             width = max(1, int(round(rect.width())))
             height = max(1, int(round(rect.height())))
-            active = node.path == self._active_path
+            active = node.path in (self._active_path, self._focus_path)
             key = ("node", node.path, round(zoom, 4), width, height, active)
             painter.drawPixmap(
                 int(rect.left()),

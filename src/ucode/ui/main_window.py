@@ -395,26 +395,33 @@ class MainWindow(QMainWindow):
 
         key = self._node_key(str(path))
         if key is None and self.folder is not None:
-            # The graph was built when the project opened: a file made since then is
-            # not a node yet, so look again once the project has been re-read.
+            # Not a node yet: either the file is newer than the graph, or it is a type
+            # the scan skips. Re-read the project and, failing that, add this one file.
             self._rebuild_project_graph()
             key = self._node_key(str(path))
+            if key is None:
+                self._rebuild_project_graph(extra=path)
+                key = self._node_key(str(path))
 
         if key is not None:
             # The canvas only holds nodes in the node view, so get there first.
             self.set_mode(ViewMode.NODE_FILES)
             if self.work_area.canvas.focus_node(key):
+                # The camera is on that node now: do not let a pending frame undo it.
+                self._graph_framed = True
                 return
 
         # Not part of the open project: show the file on its own.
         self.load_file(path)
 
-    def _rebuild_project_graph(self) -> None:
+    def _rebuild_project_graph(self, extra: Path | None = None) -> None:
         """Re-read the project, keeping the node positions the user chose."""
         if self.folder is None:
             return
 
-        self.graph = build_file_graph(self.folder)
+        self.graph = build_file_graph(
+            self.folder, [extra] if extra is not None else None
+        )
         key = self._view_key()
         self.graph.apply_positions(self.config.positions.get(key, {}))
         self.graph.apply_folder_positions(self.config.folders.get(key, {}))
@@ -484,13 +491,27 @@ class MainWindow(QMainWindow):
         if root is None:
             return None
 
+        target = Path(path).resolve()
         try:
-            relative = Path(path).resolve().relative_to(root.resolve())
+            relative = target.relative_to(root.resolve())
         except (ValueError, OSError):
-            return None
+            relative = None
 
-        key = relative.as_posix()
-        return key if key in nodes else None
+        if relative is not None:
+            key = relative.as_posix()
+            if key in nodes:
+                return key
+
+        # Different spellings of the same place — a symlinked project folder, a path
+        # through "./" — resolve to the same file, so compare the files themselves.
+        for key in nodes:
+            try:
+                if (root / key).resolve() == target:
+                    return key
+            except OSError:
+                continue
+
+        return None
 
     def _run_target(self) -> Path | None:
         """The file the Run menu should execute."""
