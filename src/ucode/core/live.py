@@ -35,7 +35,8 @@ SKIP_DIRS = {
 }
 
 POLL = 0.25
-HITS = 0.25  # how often the lines run so far are sent, so the marks keep up
+FRAME = 1 / 60  # one display refresh: the window the executed marks describe
+HITS = FRAME  # lines are reported once per frame, so the marks follow the refresh
 
 
 class Channel:

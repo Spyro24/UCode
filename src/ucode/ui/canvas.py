@@ -6,7 +6,7 @@ import time
 from math import hypot
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QClipboard,
     QColor,
@@ -59,6 +59,8 @@ from ucode.ui.theme import (
 BACKGROUND = QColor(BG_SURFACE)
 ZOOM_PER_NOTCH = 1.2
 NODE_HEADER_TILES = 1
+FRAME = 1 / 60  # a display refresh: the window executed marks describe
+MARK_LIFE = FRAME + 0.01  # one frame, plus slack so the tick that paints it keeps it
 MIN_FRAME_ZOOM = 1.0  # nodes hold code, so they open at readable size
 EDITOR_MIN_ZOOM = 0.5  # below this the node bodies are not instantiated
 LABEL_MIN_ZOOM = 0.25  # names stay readable further out than the code does
@@ -98,8 +100,12 @@ class Canvas(QWidget):
         # Where a live session failed, marked on the file in red.
         self._error_path: str | None = None
         self._error_line: int | None = None
-        # Every line the live session has run, per node: the path it took through the code.
-        self._executed: dict[str, set[int]] = {}
+        # Lines the live session ran during the last frame, per node, with when they ran:
+        # a mark fades once the frame it belongs to has been painted.
+        self._executed: dict[str, dict[int, float]] = {}
+        self._mark_timer = QTimer(self)
+        self._mark_timer.setInterval(round(FRAME * 1000))
+        self._mark_timer.timeout.connect(self._expire_marks)
         self._drag_origin: QPointF | None = None
         self._frame_pending = False
 
@@ -170,25 +176,51 @@ class Canvas(QWidget):
         self.update()
 
     def add_executed_lines(self, marks: dict[str, set[int]]) -> None:
-        """Add the lines a live session has just run, per node, to what is already shown."""
-        changed = False
+        """Mark the lines the session ran in this frame, so they show for one refresh."""
+        now = time.monotonic()
         for path, lines in marks.items():
-            known = self._executed.setdefault(path, set())
-            before = len(known)
-            known.update(lines)
-            if len(known) == before:
-                continue
+            frame = self._executed.setdefault(path, {})
+            for line in lines:
+                frame[int(line)] = now
 
             editor = self._editors.get(path)
             if editor is not None:
-                editor.set_executed_lines(known)
-            changed = True
+                editor.set_executed_lines(frame)
 
+        if marks:
+            if not self._mark_timer.isActive():
+                self._mark_timer.start()
+            self.update()
+
+    def _expire_marks(self) -> None:
+        """Drop the lines of frames that have already been painted."""
+        cutoff = time.monotonic() - MARK_LIFE
+        alive: dict[str, dict[int, float]] = {}
+        changed = False
+
+        for path, lines in self._executed.items():
+            fresh = {
+                line: seen for line, seen in lines.items()
+                if seen >= cutoff
+            }
+            if len(fresh) != len(lines):
+                changed = True
+                editor = self._editors.get(path)
+                if editor is not None:
+                    editor.set_executed_lines(fresh)
+
+            if fresh:
+                alive[path] = fresh
+
+        self._executed = alive
+        if not alive:
+            self._mark_timer.stop()
         if changed:
             self.update()
 
     def clear_executed_lines(self) -> None:
         """A new run starts with a clean page: nothing has been executed yet."""
+        self._mark_timer.stop()
         if not self._executed:
             return
 
