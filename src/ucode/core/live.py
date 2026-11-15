@@ -43,6 +43,8 @@ HITS = FRAME / 2  # reported faster than the refresh, so every frame has somethi
 VARS = 0.2  # how often the variables are sent while running: a panel, not a firehose
 MAX_VALUE = 160  # a repr longer than this is cut: the panel is a sidebar
 MAX_ENTRIES = 80
+MAX_DEPTH = 2  # an object, its attributes, and their attributes: no deeper
+MAX_CHILDREN = 24  # attributes listed per object
 
 
 class Channel:
@@ -278,9 +280,25 @@ class Live:
             event="line", file=position[0], line=position[1]
         )
 
-    def _entry(self, name: str, value, scope: str) -> dict | None:
+    @staticmethod
+    def _attributes(value) -> list[tuple[str, object]]:
+        """The object's own attributes, without calling anything or walking too far."""
+        try:
+            data = vars(value)
+        except TypeError:
+            return []
+
+        return [
+            (name, child)
+            for name, child in data.items()
+            if not (name.startswith("__") and name.endswith("__"))
+        ][:MAX_CHILDREN]
+
+    def _entry(
+        self, path: str, label: str, value, scope: str, depth: int
+    ) -> dict | None:
         """One variable, or None for the ones a panel should not list."""
-        if name.startswith("__") and name.endswith("__"):
+        if label.startswith("__") and label.endswith("__"):
             return None
         if isinstance(
             value,
@@ -299,27 +317,58 @@ class Live:
         ) or value is None
         if len(shown) > MAX_VALUE:
             shown = shown[:MAX_VALUE] + "\u2026"
-        return {"name": name, "value": shown, "scope": scope, "editable": editable}
+
+        # An object is a heading for its attributes, which are listed under it.
+        expandable = not editable and depth < MAX_DEPTH and bool(self._attributes(value))
+        return {
+            "name": path,
+            "label": label,
+            "value": shown,
+            "scope": scope,
+            "depth": depth,
+            "editable": editable,
+            "object": expandable,
+        }
+
+    def _collect(
+        self,
+        entries: list[dict],
+        path: str,
+        label: str,
+        value,
+        scope: str,
+        depth: int,
+    ) -> None:
+        if len(entries) >= MAX_ENTRIES:
+            return
+
+        entry = self._entry(path, label, value, scope, depth)
+        if entry is None:
+            return
+
+        entries.append(entry)
+        if not entry["object"]:
+            return
+
+        for name, child in self._attributes(value):
+            self._collect(entries, f"{path}.{name}", name, child, scope, depth + 1)
 
     def describe(self, frame) -> list[dict]:
-        """The variables of ``frame``, then the module's own."""
+        """The variables of ``frame``, then the module's own, with objects opened up."""
         entries: list[dict] = []
         seen: set[str] = set()
 
         local = frame.f_locals
+        scope = "local" if local is not frame.f_globals else "global"
         for name, value in local.items():
-            entry = self._entry(name, value, "local" if local is not frame.f_globals else "global")
-            if entry is not None:
-                entries.append(entry)
+            self._collect(entries, name, name, value, scope, 0)
             seen.add(name)
 
         if local is not frame.f_globals:
             for name, value in frame.f_globals.items():
                 if name in seen:
                     continue
-                entry = self._entry(name, value, "global")
-                if entry is not None:
-                    entries.append(entry)
+                self._collect(entries, name, name, value, "global", 0)
 
         return entries[:MAX_ENTRIES]
 
@@ -359,18 +408,37 @@ class Live:
 
         changed = False
         for name, value in pending.items():
-            owner, namespace = self._namespace(frame, name)
-            try:
-                namespace[name] = value
-            except (TypeError, ValueError):
-                continue
-
-            if namespace is not owner.f_globals:
-                push_locals(owner)
-            changed = True
+            if self._assign(frame, name, value):
+                changed = True
+            else:
+                self.channel.send(
+                    event="set_error", name=name, message="cannot be set here"
+                )
 
         if changed:
             self.send_vars(frame, force=True)
+
+    def _assign(self, frame, name: str, value) -> bool:
+        """Set ``name``, which may be a dotted path to an attribute, in ``frame``."""
+        parts = name.split(".")
+        try:
+            owner, namespace = self._namespace(frame, parts[0])
+            if parts[0] not in namespace:
+                return False
+
+            if len(parts) == 1:
+                namespace[parts[0]] = value
+                if namespace is not owner.f_globals:
+                    push_locals(owner)
+                return True
+
+            holder = namespace[parts[0]]
+            for part in parts[1:-1]:
+                holder = getattr(holder, part)
+            setattr(holder, parts[-1], value)
+            return True
+        except (AttributeError, TypeError, ValueError):
+            return False
 
     def command(self, command: dict) -> None:
         """A message from the window: for now, a variable to set."""

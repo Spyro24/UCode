@@ -35,18 +35,19 @@ class _Row(QFrame):
 
         self.scope = scope
         self.name = name
+        depth = int(entry.get("depth", 0) or 0)
         self.setStyleSheet(
             f"_Row {{ background-color: {BG_SURFACE}; border-radius: 3px; }}"
         )
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 2, 4, 2)
+        layout.setContentsMargins(6 + depth * 12, 2, 4, 2)
         layout.setSpacing(6)
 
-        label = QLabel(name, self)
+        label = QLabel(str(entry.get("label", name)), self)
         label.setStyleSheet(f"color: {TEXT}; background: transparent;")
-        label.setMinimumWidth(70)
-        label.setToolTip("module level" if scope == "global" else "local")
+        label.setMinimumWidth(max(24, 70 - depth * 12))
+        label.setToolTip(f"{name} \u00b7 " + ("module level" if scope == "global" else "local"))
 
         self.editor = QLineEdit(self)
         self.editor.setStyleSheet(
@@ -65,12 +66,15 @@ class _Row(QFrame):
 
         self._value = str(entry.get("value", ""))
         self.editor.setText(self._value)
+        # Reading starts at the beginning: a long repr otherwise shows its tail.
+        self.editor.setCursorPosition(0)
 
     def set_value(self, value: str) -> None:
         """Follow the program, unless the user is typing in this very box."""
         self._value = value
         if not self.editor.hasFocus():
             self.editor.setText(value)
+            self.editor.setCursorPosition(0)
 
     def value(self) -> str:
         return self.editor.text()
