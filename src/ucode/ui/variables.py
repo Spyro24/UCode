@@ -185,6 +185,7 @@ class VariablesPanel(QWidget):
         )
         self._body.setStyleSheet("background: transparent;")
         layout.addWidget(scroll, 1)
+        self._scroll = scroll
 
     # -- content -------------------------------------------------------
     def set_entries(self, entries: list[dict], where: str) -> None:
@@ -215,6 +216,15 @@ class VariablesPanel(QWidget):
     def show_text(self, text: str) -> None:
         """Say what the panel is looking at without changing the rows."""
         self.where.setText(text)
+
+    def reveal(self, name: str) -> bool:
+        """Scroll a variable into view and put the keyboard on its field."""
+        for (scope, key), row in self._rows.items():
+            if key == name or key.endswith(f".{name}"):
+                row.chip.setFocus(Qt.FocusReason.OtherFocusReason)
+                self._scroll.ensureWidgetVisible(row)
+                return True
+        return False
 
     def clear(self, reason: str = "no session") -> None:
         self.where.setText(reason)

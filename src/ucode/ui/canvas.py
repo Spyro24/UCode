@@ -78,6 +78,8 @@ class Canvas(QWidget):
 
     node_moved = Signal()  # a node was dropped somewhere new
     folder_moved = Signal()  # a folder box was dropped, taking its nodes along
+    value_edited = Signal(str, str, str)  # path, variable, the value typed for it
+    value_expanded = Signal(str, str)  # path, an object the user asked to look into
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -106,6 +108,7 @@ class Canvas(QWidget):
         self._pending_marks: dict[str, set[int]] = {}
         # What each variable holds, per node, for the values drawn beside the code.
         self._values: dict[str, dict[str, str]] = {}
+        self._plain: dict[str, set[str]] = {}
         self._mark_timer = QTimer(self)
         self._mark_timer.setInterval(round(FRAME * 1000))
         self._mark_timer.timeout.connect(self._next_frame)
@@ -148,6 +151,7 @@ class Canvas(QWidget):
         self._error_line = None
         self._executed = {}
         self._values = {}
+        self._plain = {}
         self.graph = graph
         self._nodes = graph.by_path() if graph is not None else {}
         self._drag_node = None
@@ -220,15 +224,21 @@ class Canvas(QWidget):
         self._executed = {}
         self.update()
 
-    def set_values(self, path: str | None, values: dict[str, str]) -> None:
+    def set_values(
+        self,
+        path: str | None,
+        values: dict[str, str],
+        plain: set[str] | None = None,
+    ) -> None:
         """Show these variables' values inline in the node that holds ``path``."""
         if not path:
             return
 
         self._values[path] = dict(values)
+        self._plain[path] = set(plain or ())
         editor = self._editors.get(path)
         if editor is not None:
-            editor.set_values(self._values[path])
+            editor.set_values(self._values[path], self._plain[path])
 
     def clear_values(self) -> None:
         """A session ended or moved on: no values are known any more."""
@@ -240,6 +250,7 @@ class Canvas(QWidget):
             if editor is not None:
                 editor.set_values({})
         self._values = {}
+        self._plain = {}
 
     def focus_node(self, path: str) -> bool:
         """Bring one node to the middle of the view and give its editor the keyboard."""
@@ -343,6 +354,14 @@ class Canvas(QWidget):
                 editor.content_changed.connect(
                     lambda path=node.path: self._content_changed(path)
                 )
+                editor.value_edited.connect(
+                    lambda name, text, path=node.path: self.value_edited.emit(
+                        path, name, text
+                    )
+                )
+                editor.value_expanded.connect(
+                    lambda name, path=node.path: self.value_expanded.emit(path, name)
+                )
                 self._editors[node.path] = editor
 
             editor.setGeometry(
@@ -357,7 +376,9 @@ class Canvas(QWidget):
                 # Errors and runs can land here before the node has been on screen.
                 editor.set_executed_lines(self._executed[node.path])
             if node.path in self._values:
-                editor.set_values(self._values[node.path])
+                editor.set_values(
+                    self._values[node.path], self._plain.get(node.path, set())
+                )
 
             # The node is the fixed size, so the text is fitted to it.
             editor.fit_text(

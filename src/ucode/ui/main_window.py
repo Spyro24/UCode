@@ -178,6 +178,8 @@ class MainWindow(QMainWindow):
         self.work_area.console.live_hits.connect(self._show_live_hits)
         self.work_area.console.live_vars.connect(self._show_live_vars)
         self.side_panel.variables.edited.connect(self._set_live_variable)
+        self.work_area.canvas.value_edited.connect(self._set_live_variable_in_code)
+        self.work_area.canvas.value_expanded.connect(self._reveal_live_variable)
         self.work_area.console.live_idle.connect(self._clear_live_line)
         self.work_area.console.live_reload.connect(self._clear_live_marks)
         self.work_area.console.live_stopped.connect(self._clear_live_marks)
@@ -533,9 +535,24 @@ class MainWindow(QMainWindow):
             for entry in entries
             if entry.get("name") and "." not in str(entry["name"])
         }
+        plain = {
+            str(entry.get("name", ""))
+            for entry in entries
+            if entry.get("plain") and entry.get("name") and "." not in str(entry["name"])
+        }
         node = self._node_key(path)
         if node is not None:
-            self.work_area.canvas.set_values(node, values)
+            self.work_area.canvas.set_values(node, values, plain)
+
+    def _set_live_variable_in_code(self, path: str, name: str, value: str) -> None:
+        """A value double clicked in the code: apply it like any other edit."""
+        self._set_live_variable(name, value)
+
+    def _reveal_live_variable(self, path: str, name: str) -> None:
+        """An object double clicked in the code: show its attributes in the panel."""
+        self.open_side_panel()
+        if not self.side_panel.variables.reveal(name):
+            self.side_panel.variables.show_text(f"{name} is not in this frame")
 
     def _set_live_variable(self, name: str, value: str) -> None:
         """Apply a value the user typed, in the running program."""

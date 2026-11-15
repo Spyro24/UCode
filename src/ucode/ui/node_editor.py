@@ -6,7 +6,7 @@ import ast
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFocusEvent,
@@ -17,7 +17,7 @@ from PySide6.QtGui import (
     QTextCursor,
     QTextFormat,
 )
-from PySide6.QtWidgets import QFrame, QPlainTextEdit, QTextEdit, QWidget
+from PySide6.QtWidgets import QFrame, QLineEdit, QPlainTextEdit, QTextEdit, QWidget
 
 from ucode.core.elf import parse_hex_dump
 from ucode.ui.highlighters import highlighter_for
@@ -56,11 +56,17 @@ class _LineNumbers(QWidget):
 class NodeEditor(QPlainTextEdit):
     """A plain-text code view bound to one file.
 
+    In a live session the values of the variables each line reads are drawn beside the
+    code. Double-clicking a plain value opens a field to change it; an object leads to
+    its attributes instead, because the reference itself is not what is being tested.
+
     Every node carries one of these, so editing on the canvas is editing the file: the
     contents are written back when the editor loses focus.
     """
 
     content_changed = Signal()  # the text grew or shrank: the node must follow
+    value_edited = Signal(str, str)  # a variable's name, and the value typed for it
+    value_expanded = Signal(str)  # an object was double clicked: show its attributes
 
     def __init__(
         self,
@@ -82,6 +88,16 @@ class NodeEditor(QPlainTextEdit):
         self.mode = mode
         # A hex view shows the start of a file; the rest is written back untouched.
         self._tail = tail
+
+        # Live-session state, set up before any widget work: Qt can paint and filter
+        # events during construction, before the rest of the fields would exist.
+        self._values: dict[str, str] = {}
+        self._plain: set[str] = set()
+        self._chips: list[tuple[QRect, str, bool]] = []
+        self._inline: QLineEdit | None = None
+        self._inline_name: str | None = None
+        self._reads: dict[int, list[str]] = {}
+        self._writes: dict[int, set[str]] = {}
 
         self.setObjectName("nodeEditor")
         self.setFrameShape(QFrame.Shape.NoFrame)
@@ -145,12 +161,8 @@ class NodeEditor(QPlainTextEdit):
         self._active_line: int | None = None
         self._error_line: int | None = None
         self._executed: set[int] = set()
-        # What the variables on each line hold right now, drawn beside the code.
-        self._values: dict[str, str] = {}
         # Which names each line reads and which it stores: a value is shown where it is
         # used, never on the line that merely gives it one.
-        self._reads: dict[int, list[str]] = {}
-        self._writes: dict[int, set[str]] = {}
         self._scan_names()
 
     # -- gutter --------------------------------------------------------
@@ -355,16 +367,87 @@ class NodeEditor(QPlainTextEdit):
         ]
         self.setExtraSelections(selections)
 
-    def set_values(self, values: dict[str, str]) -> None:
-        """Show these variables' values beside the lines that mention them."""
+    def set_values(self, values: dict[str, str], plain: set[str] | None = None) -> None:
+        """Show these variables' values beside the lines that read them."""
         self._values = dict(values)
+        self._plain = set(plain or ())
+        self._chips = []
         self.viewport().update()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        """A double click on a value edits it; on an object, it opens its attributes."""
+        position = event.position().toPoint()
+        for rect, name, plain in self._chips:
+            if not rect.contains(position):
+                continue
+
+            if plain:
+                self._edit_inline(name, rect)
+            else:
+                self.value_expanded.emit(name)
+            return
+
+        super().mouseDoubleClickEvent(event)
+
+    def _edit_inline(self, name: str, rect: QRect) -> None:
+        """Put a field over the value, holding it, ready to be replaced."""
+        self._close_inline()
+
+        field = QLineEdit(self.viewport())
+        width = max(rect.width(), 150)
+        left = max(0, min(rect.x(), self.viewport().width() - width - 2))
+        field.setGeometry(QRect(left, rect.y(), width, rect.height()))
+        field.setStyleSheet(
+            f"QLineEdit {{ background-color: {INLINE_VALUE_BG}; color: {TEXT};"
+            f" border: 1px solid {ACTIVE_LINE}; border-radius: 3px; padding: 0 4px; }}"
+        )
+        field.setText(self._values.get(name, ""))
+        field.selectAll()
+        field.installEventFilter(self)
+        field.editingFinished.connect(self._commit_inline)
+        field.show()
+        field.setFocus(Qt.FocusReason.MouseFocusReason)
+
+        self._inline = field
+        self._inline_name = name
+
+    def _commit_inline(self) -> None:
+        field, name = self._inline, self._inline_name
+        if field is None:
+            return
+
+        self._inline = None
+        self._inline_name = None
+        text = field.text()
+        field.hide()
+        field.deleteLater()
+        if name:
+            self.value_edited.emit(name, text)
+
+    def _close_inline(self) -> None:
+        """Drop the field without changing anything."""
+        self._inline_name = None
+        field = self._inline
+        self._inline = None
+        if field is not None:
+            field.hide()
+            field.deleteLater()
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is getattr(self, "_inline", None) and (
+            event.type() == QEvent.Type.KeyPress
+        ):
+            if event.key() == Qt.Key.Key_Escape:
+                self._close_inline()
+                return True
+        return super().eventFilter(watched, event)
 
     def paintEvent(self, event: QPaintEvent) -> None:
         super().paintEvent(event)
         if not self._values:
             return
 
+        self._chips = []
         painter = QPainter(self.viewport())
         painter.setFont(self.font())
         metrics = painter.fontMetrics()
@@ -381,14 +464,15 @@ class NodeEditor(QPlainTextEdit):
             if block.isVisible() and bottom >= event.rect().top():
                 line_number = block.blockNumber() + 1
                 stored = self._writes.get(line_number, set())
-                shown = [
-                    f"{name} = {self._values[name]}"
+                names = [
+                    name
                     for name in dict.fromkeys(self._reads.get(line_number, []))
                     if name in self._values and name not in stored
                 ]
+                shown = [f"{name} = {self._values[name]}" for name in names]
                 if shown:
                     self._paint_values(
-                        painter, metrics, block, shown, top, bottom, viewport_width
+                        painter, metrics, block, shown, top, bottom, viewport_width, names
                     )
 
             block = block.next()
@@ -406,6 +490,7 @@ class NodeEditor(QPlainTextEdit):
         top: float,
         bottom: float,
         viewport_width: int,
+        names: list[str] | None = None,
     ) -> None:
         """Draw the values just after the line's text, tall enough to read."""
         cursor = QTextCursor(block)
@@ -440,6 +525,13 @@ class NodeEditor(QPlainTextEdit):
             Qt.AlignmentFlag.AlignCenter,
             label,
         )
+
+        # Remember where it landed, so a double click can open it.
+        hint = "" if not names else names[0]
+        if hint:
+            self._chips.append(
+                (QRect(int(x), int(y), int(width), int(height)), hint, hint in self._plain)
+            )
 
     def _mark(self, line: int | None, colour: str) -> QTextEdit.ExtraSelection | None:
         """A full-width band on one line, or None when there is no such line."""
