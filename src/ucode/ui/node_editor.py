@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -146,6 +147,11 @@ class NodeEditor(QPlainTextEdit):
         self._executed: set[int] = set()
         # What the variables on each line hold right now, drawn beside the code.
         self._values: dict[str, str] = {}
+        # Which names each line reads and which it stores: a value is shown where it is
+        # used, never on the line that merely gives it one.
+        self._reads: dict[int, list[str]] = {}
+        self._writes: dict[int, set[str]] = {}
+        self._scan_names()
 
     # -- gutter --------------------------------------------------------
     def gutter_width(self) -> int:
@@ -285,9 +291,37 @@ class NodeEditor(QPlainTextEdit):
 
         self.set_font_size(3)
 
+    def _scan_names(self) -> None:
+        """Map every line to the names it reads and the names it stores."""
+        source = self.toPlainText()
+        if len(source) > 200_000 or self.mode != "source":
+            self._reads, self._writes = {}, {}
+            return
+
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError):
+            # Half-typed code: no annotations until it parses again.
+            self._reads, self._writes = {}, {}
+            return
+
+        reads: dict[int, list[str]] = {}
+        writes: dict[int, set[str]] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Name):
+                continue
+            line = getattr(node, "lineno", 0)
+            if isinstance(node.ctx, ast.Load):
+                reads.setdefault(line, []).append(node.id)
+            else:
+                writes.setdefault(line, set()).add(node.id)
+
+        self._reads, self._writes = reads, writes
+
     def _mark_content_changed(self) -> None:
         """Forget the measurements and the fit; they are redone on the next sync."""
         self._content_dirty = True
+        self._scan_names()
         self._fitted = None
         if self.mode == "source":
             self._autosave.start()
@@ -345,11 +379,12 @@ class NodeEditor(QPlainTextEdit):
 
         while block.isValid() and top <= limit:
             if block.isVisible() and bottom >= event.rect().top():
-                text = block.text()
+                line_number = block.blockNumber() + 1
+                stored = self._writes.get(line_number, set())
                 shown = [
                     f"{name} = {self._values[name]}"
-                    for name in dict.fromkeys(IDENTIFIER.findall(text))
-                    if name in self._values
+                    for name in dict.fromkeys(self._reads.get(line_number, []))
+                    if name in self._values and name not in stored
                 ]
                 if shown:
                     self._paint_values(
